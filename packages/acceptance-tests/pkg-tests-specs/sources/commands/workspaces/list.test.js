@@ -31,7 +31,7 @@ describe(`Commands`, () => {
               location: `.`,
               name: null,
               workspaceDependencies: [],
-              mismatchedWorkspaceDependencies:[],
+              mismatchedWorkspaceDependencies: [],
             },
             [`packages/workspace-a`]: {
               location: `packages/workspace-a`,
@@ -46,8 +46,8 @@ describe(`Commands`, () => {
               mismatchedWorkspaceDependencies: [],
             },
           });
-        }
-      )
+        },
+      ),
     );
 
     test(
@@ -82,7 +82,7 @@ describe(`Commands`, () => {
               location: `.`,
               name: null,
               workspaceDependencies: [],
-              mismatchedWorkspaceDependencies:[],
+              mismatchedWorkspaceDependencies: [],
             },
             [`packages/workspace-a`]: {
               location: `packages/workspace-a`,
@@ -97,8 +97,8 @@ describe(`Commands`, () => {
               mismatchedWorkspaceDependencies: [],
             },
           });
-        }
-      )
+        },
+      ),
     );
 
     test(
@@ -130,7 +130,7 @@ describe(`Commands`, () => {
               location: `.`,
               name: null,
               workspaceDependencies: [],
-              mismatchedWorkspaceDependencies:[],
+              mismatchedWorkspaceDependencies: [],
             },
             [`packages/workspace-a`]: {
               location: `packages/workspace-a`,
@@ -145,8 +145,8 @@ describe(`Commands`, () => {
               mismatchedWorkspaceDependencies: [],
             },
           });
-        }
-      )
+        },
+      ),
     );
   });
 });

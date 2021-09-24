@@ -1,24 +1,30 @@
-import {FakeFS, PosixFS, npath, patchFs, PortablePath, Filename, NativePath} from '@yarnpkg/fslib';
-import fs                                                                    from 'fs';
-import {Module}                                                              from 'module';
-import {URL, fileURLToPath}                                                  from 'url';
+import {FakeFS, PosixFS, npath, patchFs, PortablePath, NativePath} from '@yarnpkg/fslib';
+import fs                                                          from 'fs';
+import {Module}                                                    from 'module';
+import {URL, fileURLToPath}                                        from 'url';
 
-import {PnpApi}                                                              from '../types';
+import {PnpApi}                                                    from '../types';
 
-import {ErrorCode, makeError, getIssuerModule}                               from './internalTools';
-import {Manager}                                                             from './makeManager';
+import {ErrorCode, makeError, getIssuerModule}                     from './internalTools';
+import {Manager}                                                   from './makeManager';
 
 export type ApplyPatchOptions = {
   fakeFs: FakeFS<PortablePath>,
   manager: Manager,
 };
 
+type PatchedModule = Module & {
+  load(path: NativePath): void;
+  isLoading?: boolean;
+};
+
 export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
   // @ts-expect-error
   const builtinModules = new Set(Module.builtinModules || Object.keys(process.binding(`natives`)));
+  const isBuiltinModule = (request: string) => builtinModules.has(request) || request.startsWith(`node:`);
 
   /**
-   * The cache that will be used for all accesses occuring outside of a PnP context.
+   * The cache that will be used for all accesses occurring outside of a PnP context.
    */
 
   const defaultCache: NodeJS.NodeRequireCache = {};
@@ -45,7 +51,8 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
       return null;
 
     const apiEntry = opts.manager.getApiEntry(apiPath, true);
-    return apiEntry.instance;
+    // Check if the path is ignored
+    return apiEntry.instance.findPackageLocator(lookupPath) ? apiEntry.instance : null;
   };
 
   function getRequireStack(parent: Module | null | undefined) {
@@ -71,7 +78,7 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
 
     // Builtins are managed by the regular Node loader
 
-    if (builtinModules.has(request)) {
+    if (isBuiltinModule(request)) {
       try {
         enableNativeHooks = false;
         return originalModuleLoad.call(Module, request, parent, isMain);
@@ -122,15 +129,31 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
 
     // Check if the module has already been created for the given file
 
-    const cacheEntry = entry.cache[modulePath];
-    if (cacheEntry)
+    const cacheEntry = entry.cache[modulePath] as PatchedModule;
+    if (cacheEntry) {
+      // When a dynamic import is used in CJS files Node adds the module
+      // to the cache but doesn't load it so we do it here.
+      //
+      // Keep track of and check if the module is already loading to
+      // handle circular requires.
+      //
+      // The explicit checks are required since `@babel/register` et al.
+      // create modules without the `loaded` and `load` properties
+      if (cacheEntry.loaded === false && cacheEntry.isLoading !== true) {
+        try {
+          cacheEntry.isLoading = true;
+          cacheEntry.load(modulePath);
+        } finally {
+          cacheEntry.isLoading = false;
+        }
+      }
+
       return cacheEntry.exports;
+    }
 
     // Create a new module and store it into the cache
 
-    // @ts-expect-error
-    const module = new Module(modulePath, parent);
-    // @ts-expect-error
+    const module = new Module(modulePath, parent ?? undefined) as PatchedModule;
     module.pnpApiPath = moduleApiPath;
 
     entry.cache[modulePath] = module;
@@ -147,10 +170,11 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
     let hasThrown = true;
 
     try {
-    // @ts-expect-error
+      module.isLoading = true;
       module.load(modulePath);
       hasThrown = false;
     } finally {
+      module.isLoading = false;
       if (hasThrown) {
         delete Module._cache[modulePath];
       }
@@ -174,23 +198,36 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
   }
 
   function getIssuerSpecsFromModule(module: NodeModule | null | undefined): Array<IssuerSpec> {
+    if (module && module.id !== `<repl>` && module.id !== `internal/preload` && !module.parent && !module.filename && module.paths.length > 0) {
+      return [{
+        apiPath: opts.manager.findApiPathFor(module.paths[0]),
+        path: module.paths[0],
+        module,
+      }];
+    }
+
     const issuer = getIssuerModule(module);
 
-    const issuerPath = issuer !== null
-      ? npath.dirname(issuer.filename)
-      : process.cwd();
+    if (issuer !== null) {
+      const path = npath.dirname(issuer.filename);
+      const apiPath = opts.manager.getApiPathFromParent(issuer);
 
-    return [{
-      apiPath: opts.manager.getApiPathFromParent(issuer),
-      path: issuerPath,
-      module,
-    }];
+      return [{apiPath, path, module}];
+    } else {
+      const path = process.cwd();
+
+      const apiPath =
+        opts.manager.findApiPathFor(npath.join(path, `[file]`)) ??
+        opts.manager.getApiPathFromParent(null);
+
+      return [{apiPath, path, module}];
+    }
   }
 
   function makeFakeParent(path: string) {
     const fakeParent = new Module(``);
 
-    const fakeFilePath = npath.join(path, `[file]` as Filename);
+    const fakeFilePath = npath.join(path, `[file]`);
     fakeParent.paths = Module._nodeModulePaths(fakeFilePath);
 
     return fakeParent;
@@ -202,7 +239,7 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
   const originalModuleResolveFilename = Module._resolveFilename;
 
   Module._resolveFilename = function(request: string, parent: (NodeModule & {pnpApiPath?: PortablePath}) | null | undefined, isMain: boolean, options?: {[key: string]: any}) {
-    if (builtinModules.has(request))
+    if (isBuiltinModule(request))
       return request;
 
     if (!enableNativeHooks)
@@ -236,7 +273,7 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
       if (optionNames.size > 0) {
         throw makeError(
           ErrorCode.UNSUPPORTED,
-          `Some options passed to require() aren't supported by PnP yet (${Array.from(optionNames).join(`, `)})`
+          `Some options passed to require() aren't supported by PnP yet (${Array.from(optionNames).join(`, `)})`,
         );
       }
     }
@@ -311,6 +348,9 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
     if (requireStack.length > 0)
       firstError.message += `\nRequire stack:\n- ${requireStack.join(`\n- `)}`;
 
+    if (typeof firstError.pnpCode === `string`)
+      Error.captureStackTrace(firstError);
+
     throw firstError;
   };
 
@@ -320,7 +360,12 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
     if (request === `pnpapi`)
       return false;
 
-    if (!enableNativeHooks)
+    // Node sometimes call this function with an absolute path and a `null` set
+    // of paths. This would cause the resolution to fail. To avoid that, we
+    // fallback on the regular resolution. We only do this when `isMain` is
+    // true because the Node default resolution doesn't handle well in-zip
+    // paths, even absolute, so we try to use it as little as possible.
+    if (!enableNativeHooks || (isMain && npath.isAbsolute(request)))
       return originalFindPath.call(Module, request, paths, isMain);
 
     for (const path of paths || []) {

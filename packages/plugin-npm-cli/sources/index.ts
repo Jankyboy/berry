@@ -1,6 +1,6 @@
-
 import {Plugin, SettingsType} from '@yarnpkg/core';
 
+import npmAudit               from './commands/npm/audit';
 import npmInfo                from './commands/npm/info';
 import npmLogin               from './commands/npm/login';
 import npmLogout              from './commands/npm/logout';
@@ -12,7 +12,7 @@ import npmWhoami              from './commands/npm/whoami';
 
 declare module '@yarnpkg/core' {
   interface ConfigurationValueMap {
-    npmPublishAccess: string|null;
+    npmPublishAccess: string | null;
   }
 }
 
@@ -25,6 +25,7 @@ const plugin: Plugin = {
     },
   },
   commands: [
+    npmAudit,
     npmInfo,
     npmLogin,
     npmLogout,

@@ -1,41 +1,55 @@
-import {npath}                      from '@yarnpkg/fslib';
+import {npath}                                                              from '@yarnpkg/fslib';
+import chalk                                                                from 'chalk';
+import {CIRCLE as isCircleCI}                                               from 'ci-info';
+import micromatch                                                           from 'micromatch';
+import stripAnsi                                                            from 'strip-ansi';
 
-import chalk                        from 'chalk';
+import {Configuration, ConfigurationValueMap}                               from './Configuration';
+import {MessageName, stringifyMessageName}                                  from './MessageName';
+import {Report}                                                             from './Report';
+import * as miscUtils                                                       from './miscUtils';
+import * as structUtils                                                     from './structUtils';
+import {Descriptor, Locator, Ident, PackageExtension, PackageExtensionType} from './types';
 
-import {Configuration}              from './Configuration';
-import * as miscUtils               from './miscUtils';
-import * as structUtils             from './structUtils';
-import {Descriptor, Locator, Ident} from './types';
+// We have to workaround a TS bug:
+// https://github.com/microsoft/TypeScript/issues/35329
+//
+// We also can't use const enum because Babel doesn't support them:
+// https://github.com/babel/babel/issues/8741
+//
+export const Type = {
+  NO_HINT: `NO_HINT`,
 
-export enum Type {
-  NO_HINT = `NO_HINT`,
+  NULL: `NULL`,
 
-  NULL = `NULL`,
+  SCOPE: `SCOPE`,
+  NAME: `NAME`,
+  RANGE: `RANGE`,
+  REFERENCE: `REFERENCE`,
 
-  SCOPE = `SCOPE`,
-  NAME = `NAME`,
-  RANGE = `RANGE`,
-  REFERENCE = `REFERENCE`,
+  NUMBER: `NUMBER`,
+  PATH: `PATH`,
+  URL: `URL`,
+  ADDED: `ADDED`,
+  REMOVED: `REMOVED`,
+  CODE: `CODE`,
 
-  NUMBER = `NUMBER`,
-  PATH = `PATH`,
-  URL = `URL`,
-  ADDED = `ADDED`,
-  REMOVED = `REMOVED`,
-  CODE = `CODE`,
+  DURATION: `DURATION`,
+  SIZE: `SIZE`,
 
-  DURATION = `DURATION`,
-  SIZE = `SIZE`,
+  IDENT: `IDENT`,
+  DESCRIPTOR: `DESCRIPTOR`,
+  LOCATOR: `LOCATOR`,
+  RESOLUTION: `RESOLUTION`,
+  DEPENDENT: `DEPENDENT`,
+  PACKAGE_EXTENSION: `PACKAGE_EXTENSION`,
+  SETTING: `SETTING`,
+} as const;
 
-  IDENT = `IDENT`,
-  DESCRIPTOR = `DESCRIPTOR`,
-  LOCATOR = `LOCATOR`,
-  RESOLUTION = `RESOLUTION`,
-  DEPENDENT = `DEPENDENT`,
-}
+export type Type = keyof typeof Type;
 
 export enum Style {
-  BOLD = 1 << 1
+  BOLD = 1 << 1,
 }
 
 const chalkOptions = process.env.GITHUB_ACTIONS
@@ -45,11 +59,11 @@ const chalkOptions = process.env.GITHUB_ACTIONS
     : {level: 0};
 
 export const supportsColor = chalkOptions.level !== 0;
-export const supportsHyperlinks = supportsColor && !process.env.GITHUB_ACTIONS;
+export const supportsHyperlinks = supportsColor && !process.env.GITHUB_ACTIONS && !isCircleCI;
 
 const chalkInstance = new chalk.Instance(chalkOptions);
 
-const colors = new Map([
+const colors = new Map<Type, [string, number] | null>([
   [Type.NO_HINT, null],
 
   [Type.NULL, [`#a853b5`, 129]],
@@ -147,6 +161,45 @@ const transforms = {
     },
   }),
 
+  [Type.PACKAGE_EXTENSION]: validateTransform({
+    pretty: (configuration: Configuration, packageExtension: PackageExtension) => {
+      switch (packageExtension.type) {
+        case PackageExtensionType.Dependency:
+          return `${structUtils.prettyIdent(configuration, packageExtension.parentDescriptor)} ➤ ${applyColor(configuration, `dependencies`, Type.CODE)} ➤ ${structUtils.prettyIdent(configuration, packageExtension.descriptor)}`;
+        case PackageExtensionType.PeerDependency:
+          return `${structUtils.prettyIdent(configuration, packageExtension.parentDescriptor)} ➤ ${applyColor(configuration, `peerDependencies`, Type.CODE)} ➤ ${structUtils.prettyIdent(configuration, packageExtension.descriptor)}`;
+        case PackageExtensionType.PeerDependencyMeta:
+          return `${structUtils.prettyIdent(configuration, packageExtension.parentDescriptor)} ➤ ${applyColor(configuration, `peerDependenciesMeta`, Type.CODE)} ➤ ${structUtils.prettyIdent(configuration, structUtils.parseIdent(packageExtension.selector))} ➤ ${applyColor(configuration, packageExtension.key, Type.CODE)}`;
+        default:
+          throw new Error(`Assertion failed: Unsupported package extension type: ${(packageExtension as PackageExtension).type}`);
+      }
+    },
+    json: (packageExtension: PackageExtension) => {
+      switch (packageExtension.type) {
+        case PackageExtensionType.Dependency:
+          return `${structUtils.stringifyIdent(packageExtension.parentDescriptor)} > ${structUtils.stringifyIdent(packageExtension.descriptor)}`;
+        case PackageExtensionType.PeerDependency:
+          return `${structUtils.stringifyIdent(packageExtension.parentDescriptor)} >> ${structUtils.stringifyIdent(packageExtension.descriptor)}`;
+        case PackageExtensionType.PeerDependencyMeta:
+          return `${structUtils.stringifyIdent(packageExtension.parentDescriptor)} >> ${packageExtension.selector} / ${packageExtension.key}`;
+        default:
+          throw new Error(`Assertion failed: Unsupported package extension type: ${(packageExtension as PackageExtension).type}`);
+      }
+    },
+  }),
+
+  [Type.SETTING]: validateTransform({
+    pretty: (configuration: Configuration, settingName: keyof ConfigurationValueMap) => {
+      // Asserts that the setting is valid
+      configuration.get(settingName);
+
+      return applyHyperlink(configuration, applyColor(configuration, settingName, Type.CODE), `https://yarnpkg.com/configuration/yarnrc#${settingName}`);
+    },
+    json: (settingName: string) => {
+      return settingName;
+    },
+  }),
+
   [Type.DURATION]: validateTransform({
     pretty: (configuration: Configuration, duration: number) => {
       if (duration > 1000 * 60) {
@@ -201,6 +254,11 @@ export type Source<T> = T extends keyof AllTransforms
 export type Tuple<T extends Type = Type> =
   readonly [Source<T>, T];
 
+export type Field = {
+  label: string;
+  value: Tuple<any>;
+};
+
 export function tuple<T extends Type>(formatType: T, value: Source<T>): Tuple<T> {
   return [value, formatType];
 }
@@ -241,6 +299,24 @@ export function applyColor(configuration: Configuration, value: string, formatTy
   return fn(value);
 }
 
+const isKonsole = !!process.env.KONSOLE_VERSION;
+
+export function applyHyperlink(configuration: Configuration, text: string, href: string) {
+  // Only print hyperlinks if allowed per configuration
+  if (!configuration.get(`enableHyperlinks`))
+    return text;
+
+  // We use ESC as ST for Konsole because it doesn't support
+  // the non-standard BEL character for hyperlinks
+  if (isKonsole)
+    return `\u001b]8;;${href}\u001b\\${text}\u001b]8;;\u001b\\`;
+
+  // We use BELL as ST because it seems that iTerm doesn't properly support
+  // the \x1b\\ sequence described in the reference document
+  // https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda#the-escape-sequence
+  return `\u001b]8;;${href}\u0007${text}\u001b]8;;\u0007`;
+}
+
 export function pretty<T extends Type>(configuration: Configuration, value: Source<T>, formatType: T | string): string {
   if (value === null)
     return applyColor(configuration, `null`, Type.NULL);
@@ -274,4 +350,124 @@ export function json<T extends Type>(value: Source<T>, formatType: T | string): 
     throw new Error(`Assertion failed: Expected the value to be a string, got ${typeof value}`);
 
   return value;
+}
+
+export function mark(configuration: Configuration) {
+  return {
+    Check: applyColor(configuration, `✓`, `green`),
+    Cross: applyColor(configuration, `✘`, `red`),
+    Question: applyColor(configuration, `?`, `cyan`),
+  };
+}
+
+export function prettyField(configuration: Configuration, {label, value: [value, formatType]}: Field) {
+  return `${pretty(configuration, label, Type.CODE)}: ${pretty(configuration, value, formatType)}`;
+}
+
+export enum LogLevel {
+  Error = `error`,
+  Warning = `warning`,
+  Info = `info`,
+  Discard = `discard`,
+}
+
+/**
+ * Add support support for the `logFilters` setting to the specified Report
+ * instance.
+ */
+export function addLogFilterSupport(report: Report, {configuration}: {configuration: Configuration}) {
+  const logFilters = configuration.get(`logFilters`);
+
+  const logFiltersByCode = new Map<string, LogLevel | null>();
+  const logFiltersByText = new Map<string, LogLevel | null>();
+  const logFiltersByPatternMatcher: Array<[(str: string) => boolean, LogLevel | null]> = [];
+
+  for (const filter of logFilters) {
+    const level = filter.get(`level`);
+    if (typeof level === `undefined`)
+      continue;
+
+    const code = filter.get(`code`);
+    if (typeof code !== `undefined`)
+      logFiltersByCode.set(code, level);
+
+    const text = filter.get(`text`);
+    if (typeof text !== `undefined`)
+      logFiltersByText.set(text, level);
+
+    const pattern = filter.get(`pattern`);
+    if (typeof pattern !== `undefined`) {
+      logFiltersByPatternMatcher.push([micromatch.matcher(pattern, {contains: true}), level]);
+    }
+  }
+
+  // Higher priority to the last patterns, just like other filters
+  logFiltersByPatternMatcher.reverse();
+
+  const findLogLevel = (name: MessageName | null, text: string, defaultLevel: LogLevel) => {
+    if (name === null || name === MessageName.UNNAMED)
+      return defaultLevel;
+
+    // Avoid processing the string unless we know we'll actually need it
+    const strippedText = logFiltersByText.size > 0 || logFiltersByPatternMatcher.length > 0
+      ? stripAnsi(text)
+      : text;
+
+    if (logFiltersByText.size > 0) {
+      const level = logFiltersByText.get(strippedText);
+
+      if (typeof level !== `undefined`) {
+        return level ?? defaultLevel;
+      }
+    }
+
+    if (logFiltersByPatternMatcher.length > 0) {
+      for (const [filterMatcher, filterLevel] of logFiltersByPatternMatcher) {
+        if (filterMatcher(strippedText)) {
+          return filterLevel ?? defaultLevel;
+        }
+      }
+    }
+
+    if (logFiltersByCode.size > 0) {
+      const level = logFiltersByCode.get(stringifyMessageName(name));
+      if (typeof level !== `undefined`) {
+        return level ?? defaultLevel;
+      }
+    }
+
+    return defaultLevel;
+  };
+
+  const reportInfo = report.reportInfo;
+  const reportWarning = report.reportWarning;
+  const reportError = report.reportError;
+
+  const routeMessage = function (report: Report, name: MessageName | null, text: string, level: LogLevel) {
+    switch (findLogLevel(name, text, level)) {
+      case LogLevel.Info: {
+        reportInfo.call(report, name, text);
+      } break;
+
+      case LogLevel.Warning: {
+        reportWarning.call(report, name ?? MessageName.UNNAMED, text);
+      } break;
+
+      case LogLevel.Error: {
+        reportError.call(report, name ?? MessageName.UNNAMED, text);
+      } break;
+    }
+  };
+
+  report.reportInfo = function (...args) {
+    return routeMessage(this, ...args, LogLevel.Info);
+  };
+
+  report.reportWarning = function (...args) {
+    return routeMessage(this, ...args, LogLevel.Warning);
+  };
+
+  report.reportError = function (...args) {
+    return routeMessage(this, ...args, LogLevel.Error);
+  };
 }

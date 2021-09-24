@@ -1,7 +1,7 @@
-import {CommandContext, Configuration} from '@yarnpkg/core';
-import {Command, Cli}                  from 'clipanion';
+import {BaseCommand}                            from '@yarnpkg/cli';
+import {Configuration}                          from '@yarnpkg/core';
+import {Cli, Definition as ClipanionDefinition} from 'clipanion';
 
-type ClipanionDefinition = ReturnType<Cli['definitions']>[number];
 type ExtendedDefinition = ClipanionDefinition & {
   plugin: {
     name: string,
@@ -10,8 +10,11 @@ type ExtendedDefinition = ClipanionDefinition & {
 };
 
 // eslint-disable-next-line arca/no-default-export
-export default class ClipanionCommand extends Command<CommandContext> {
-  @Command.Path(`--clipanion=definitions`)
+export default class ClipanionCommand extends BaseCommand {
+  static paths = [
+    [`--clipanion=definitions`],
+  ];
+
   async execute() {
     const {plugins} = await Configuration.find(this.context.cwd, this.context.plugins);
 
@@ -45,8 +48,6 @@ export default class ClipanionCommand extends Command<CommandContext> {
       }
     }
 
-    this.context.stdout.write(`${JSON.stringify({
-      commands: clipanionDefinitions,
-    }, null, 2)}\n`);
+    this.context.stdout.write(`${JSON.stringify(clipanionDefinitions, null, 2)}\n`);
   }
 }

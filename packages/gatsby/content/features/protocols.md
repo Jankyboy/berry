@@ -2,6 +2,7 @@
 category: features
 path: /features/protocols
 title: "Protocols"
+description: An in-depth guide to Yarn's various protocols.
 ---
 
 ```toc
@@ -12,18 +13,19 @@ title: "Protocols"
 
 The following protocols can be used by any dependency entry listed in the `dependencies` or `devDependencies` fields. While they work regardless of the context we strongly recommend you to only use semver ranges on published packages as they are the one common protocol whose semantic is clearly defined across all package managers.
 
-| Name          | Example                                 | Description                                                                                                                     |
-| ------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Semver        | `^1.2.3`                                | Resolves from the default registry                                                                                              |
-| Tag           | `latest`                                | Resolves from the default registry                                                                                              |
-| Npm alias     | `npm:name@...`                          | Resolves from the npm registry                                                                                                  |
-| Git           | `git@github.com:foo/bar.git`            | Downloads a public package from a Git repository                                                                                |
-| GitHub        | `github:foo/bar`                        | Downloads a **public** package from GitHub                                                                                      |
-| GitHub        | `foo/bar`                               | Alias for the `github:` protocol                                                                                                |
-| File          | `file:./my-package`                     | Copies the target location into the cache                                                                                       |
-| Link          | `link:./my-folder`                      | Creates a link to the `./my-folder` folder (ignore dependencies)                                                                |
-| Patch         | `patch:left-pad@1.0.0#./my-patch.patch` | Creates a patched copy of the original package                                                                                  |
-| Portal        | `portal:./my-folder`                    | Creates a link to the `./my-folder` folder (follow dependencies)                                                                |
+| Name          | Example                                 | Description                                                                                                                       |
+| ------------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Semver        | `^1.2.3`                                | Resolves from the default registry                                                                                                 |
+| Tag           | `latest`                                | Resolves from the default registry                                                                                                 |
+| Npm alias     | `npm:name@...`                          | Resolves from the npm registry                                                                                                     |
+| Git           | `git@github.com:foo/bar.git`            | Downloads a public package from a Git repository                                                                                   |
+| GitHub        | `github:foo/bar`                        | Downloads a **public** package from GitHub                                                                                         |
+| GitHub        | `foo/bar`                               | Alias for the `github:` protocol                                                                                                   |
+| File          | `file:./my-package`                     | Copies the target location into the cache                                                                                         |
+| Link          | `link:./my-folder`                      | Creates a link to the `./my-folder` folder (ignore dependencies)                                                                   |
+| Patch         | `patch:left-pad@1.0.0#./my-patch.patch` | Creates a patched copy of the original package                                                                                     |
+| Portal        | `portal:./my-folder`                    | Creates a link to the `./my-folder` folder (follow dependencies)                                                                   |
+| Workspace     | `workspace:*`                           | Creates a link to a package in another workspace                                                                                   |
 | [Exec](#exec) | `exec:./my-generator-package`           | <sup>*Experimental & Plugin*</sup><br>Instructs Yarn to execute the specified Node script and use its output as package content |
 
 ## Details
@@ -63,14 +65,20 @@ The `patch:` protocol is meant to be used with [`yarn patch`](/cli/patch) and [`
 1. Find a package you want to patch (let's say `lodash@^1.0.0`)
 2. Run `yarn patch lodash`
 3. Edit the folder the command generated
-4. Once you're done, run `yarn patch-commit <path> > my-patch.diff`
+4. Once you're done, run `yarn patch-commit -s <path>`
 5. In your manifest, change the dependency from `^1.0.0` to:
 
 ```
-patch:lodash@^1.0.0#./my-patch.diff
+patch:lodash@^1.0.0#path/to/generated/file.patch
 ```
 
 Note that if you wish to update a transitive dependency (ie not directly yours), it's perfectly possible to use the [`resolutions` field](/configuration/manifest#resolutions).
+
+### Workspace
+
+The `workspace:` protocol is meant to be used with [workspaces](/features/workspaces#workspace-ranges-workspace). While Yarn automatically picks workspace resolutions when they match, there are times where you absolutely don't want to risk using a package from the remote registry even if the versions don't match (for example if your project isn't actually meant to be published and you just want to use the workspaces to better compartmentalize your code). 
+
+Our current recommendation is to use `workspace:*`, which will almost always do what you expect. See [the documentation of workspaces](/features/workspaces#workspace-ranges-workspace) for full details about this protocol.
 
 ## Frequently Asked Questions
 
@@ -123,7 +131,7 @@ Enter the `link:` protocol! Through it, you directly instruct the package manage
 
 > **Tip:** Yarn 2 implements support for self-references, making the `link:` protocol unneeded in most cases. Any file that's part of a package will always be able to import any file from its own package using the package name - even the top-level project! Just add a `"name": "app"` field into your top-level package.json, and you'll be able to use `import 'app/Toolbar'` without further ado.
 
-> **Note:** You may be tempted t alias a scope without giving an explicit name (ie `"@app": "link:./src"`). Don't. This pattern is invalid and won't work. The reason for this is that package identifiers have a required package name, and an optional scope name. As a result, a scope without package name is a syntax error. Prefer doing `"app": "link:./src"`, which will still allow you to use subdirectories if needed (ie `import 'app/toolbar/Icon'`).
+> **Note:** You may be tempted to alias a scope without giving an explicit name (ie `"@app": "link:./src"`). Don't. This pattern is invalid and won't work. The reason for this is that package identifiers have a required package name, and an optional scope name. As a result, a scope without package name is a syntax error. Prefer doing `"app": "link:./src"`, which will still allow you to use subdirectories if needed (ie `import 'app/toolbar/Icon'`).
 
 > **Note:** By reading this FAQ entry, you might think that we recommend against using aliases altogether. This isn't entirely correct. While using aliases *for directory mapping* is a practice we advise against, they have their usefulness in other contexts. For example, using an alias to map the `fs` module into a local mock is perfectly fine.
 

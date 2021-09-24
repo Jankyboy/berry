@@ -1,30 +1,16 @@
-import {BaseCommand}                         from '@yarnpkg/cli';
-import {Configuration, Manifest, Project}    from '@yarnpkg/core';
-import {execUtils, scriptUtils, structUtils} from '@yarnpkg/core';
-import {xfs, ppath, Filename}                from '@yarnpkg/fslib';
-import {Command, Usage, UsageError}          from 'clipanion';
-import merge                                 from 'lodash/merge';
-import {inspect}                             from 'util';
+import {BaseCommand}                                              from '@yarnpkg/cli';
+import {Configuration, Manifest, miscUtils, Project, YarnVersion} from '@yarnpkg/core';
+import {execUtils, scriptUtils, structUtils}                      from '@yarnpkg/core';
+import {xfs, ppath, Filename}                                     from '@yarnpkg/fslib';
+import {Command, Option, Usage, UsageError}                       from 'clipanion';
+import merge                                                      from 'lodash/merge';
+import {inspect}                                                  from 'util';
 
 // eslint-disable-next-line arca/no-default-export
 export default class InitCommand extends BaseCommand {
-  @Command.Boolean(`-2`, {hidden: true})
-  usev2: boolean = false;
-
-  @Command.Boolean(`--assume-fresh-project`, {hidden: true})
-  assumeFreshProject: boolean = false;
-
-  @Command.Boolean(`-y,--yes`, {hidden: true})
-  yes: boolean = false;
-
-  @Command.Boolean(`-p,--private`, {description: `Initialize a private package`})
-  private: boolean = false;
-
-  @Command.Boolean(`-w,--workspace`, {description: `Initialize a private workspace root with a \`packages/\` directory`})
-  workspace: boolean = false;
-
-  @Command.String(`-i,--install`, {tolerateBoolean: true, description: `Initialize a package with a specific bundle that will be locked in the project`})
-  install: string | boolean = false;
+  static paths = [
+    [`init`],
+  ];
 
   static usage: Usage = Command.Usage({
     description: `create a new package`,
@@ -47,23 +33,43 @@ export default class InitCommand extends BaseCommand {
       `yarn init -p`,
     ], [
       `Create a new package and store the Yarn release inside`,
-      `yarn init -i latest`,
+      `yarn init -i=latest`,
     ], [
       `Create a new private package and defines it as a workspace root`,
       `yarn init -w`,
     ]],
   });
 
-  @Command.Path(`init`)
-  async execute() {
-    if (xfs.existsSync(ppath.join(this.context.cwd, Manifest.fileName)))
-      throw new UsageError(`A package.json already exists in the specified directory`);
+  private = Option.Boolean(`-p,--private`, false, {
+    description: `Initialize a private package`,
+  });
 
+  workspace = Option.Boolean(`-w,--workspace`, false, {
+    description: `Initialize a workspace root with a \`packages/\` directory`,
+  });
+
+  install = Option.String(`-i,--install`, false, {
+    tolerateBoolean: true,
+    description: `Initialize a package with a specific bundle that will be locked in the project`,
+  });
+
+  // Options that only mattered on v1
+  usev2 = Option.Boolean(`-2`, false, {hidden: true});
+  yes = Option.Boolean(`-y,--yes`, {hidden: true});
+
+  // Deprecated; doesn't have any effect anymore, but we can't remove it for
+  // some time as it has some risks of breaking a few special setups.
+  // TODO: Remove it in 4.x.
+  assumeFreshProject = Option.Boolean(`--assume-fresh-project`, false, {hidden: true});
+
+  async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
 
-    const install = this.install
-      ? this.install === true ? `latest` : this.install
-      : null;
+    const install = typeof this.install === `string`
+      ? this.install
+      : this.usev2 || this.install === true
+        ? `latest`
+        : null;
 
     if (install !== null) {
       return await this.executeProxy(configuration, install);
@@ -73,11 +79,8 @@ export default class InitCommand extends BaseCommand {
   }
 
   async executeProxy(configuration: Configuration, version: string) {
-    if (configuration.get(`yarnPath`) !== null)
-      throw new UsageError(`Cannot use the --install flag when the current directory already uses yarnPath (from ${configuration.sources.get(`yarnPath`)})`);
-
-    if (configuration.projectCwd !== null)
-      throw new UsageError(`Cannot use the --install flag when the current directory is already part of a project`);
+    if (configuration.projectCwd !== null && configuration.projectCwd !== this.context.cwd)
+      throw new UsageError(`Cannot use the --install flag from within a project subdirectory`);
 
     if (!xfs.existsSync(this.context.cwd))
       await xfs.mkdirPromise(this.context.cwd, {recursive: true});
@@ -86,13 +89,13 @@ export default class InitCommand extends BaseCommand {
     if (!xfs.existsSync(lockfilePath))
       await xfs.writeFilePromise(lockfilePath, ``);
 
-    const versionExitCode = await this.cli.run([`set`, `version`, version]);
+    const versionExitCode = await this.cli.run([`set`, `version`, version], {quiet: true});
     if (versionExitCode !== 0)
       return versionExitCode;
 
     this.context.stdout.write(`\n`);
 
-    const args: Array<string> = [`--assume-fresh-project`];
+    const args: Array<string> = [];
     if (this.private)
       args.push(`-p`);
     if (this.workspace)
@@ -114,29 +117,32 @@ export default class InitCommand extends BaseCommand {
   }
 
   async executeRegular(configuration: Configuration) {
-    let existingProject: {project: Project} | null = null;
-    if (!this.assumeFreshProject) {
-      try {
-        existingProject = await Project.find(configuration, this.context.cwd);
-      } catch {
-        existingProject = null;
-      }
+    let existingProject: Project | null = null;
+    try {
+      existingProject = (await Project.find(configuration, this.context.cwd)).project;
+    } catch {
+      existingProject = null;
     }
 
     if (!xfs.existsSync(this.context.cwd))
       await xfs.mkdirPromise(this.context.cwd, {recursive: true});
 
-    const manifest = new Manifest();
+    const manifest = (await Manifest.tryFind(this.context.cwd)) || new Manifest();
 
     const fields = Object.fromEntries(configuration.get(`initFields`).entries());
     manifest.load(fields);
 
-    manifest.name = structUtils.makeIdent(configuration.get(`initScope`), ppath.basename(this.context.cwd));
-    manifest.version = configuration.get(`initVersion`);
-    manifest.private = this.private || this.workspace;
-    manifest.license = configuration.get(`initLicense`);
+    manifest.name = manifest.name
+      ?? structUtils.makeIdent(configuration.get(`initScope`), ppath.basename(this.context.cwd));
 
-    if (this.workspace) {
+    manifest.packageManager = YarnVersion && miscUtils.isTaggedYarnVersion(YarnVersion)
+      ? `yarn@${YarnVersion}`
+      : null;
+
+    if (typeof manifest.raw.private === `undefined` && (this.private || (this.workspace && manifest.workspaceDefinitions.length === 0)))
+      manifest.private = true;
+
+    if (this.workspace && manifest.workspaceDefinitions.length === 0) {
       await xfs.mkdirPromise(ppath.join(this.context.cwd, `packages` as Filename), {recursive: true});
       manifest.workspaceDefinitions = [{
         pattern: `packages/*`,
@@ -156,32 +162,24 @@ export default class InitCommand extends BaseCommand {
     })}\n`);
 
     const manifestPath = ppath.join(this.context.cwd, Manifest.fileName);
-    await xfs.changeFilePromise(manifestPath, `${JSON.stringify(serialized, null, 2)}\n`);
+    await xfs.changeFilePromise(manifestPath, `${JSON.stringify(serialized, null, 2)}\n`, {
+      automaticNewlines: true,
+    });
 
     const readmePath = ppath.join(this.context.cwd, `README.md` as Filename);
     if (!xfs.existsSync(readmePath))
       await xfs.writeFilePromise(readmePath, `# ${structUtils.stringifyIdent(manifest.name)}\n`);
 
-    if (!existingProject) {
+    if (!existingProject || existingProject.cwd === this.context.cwd) {
       const lockfilePath = ppath.join(this.context.cwd, Filename.lockfile);
-      await xfs.writeFilePromise(lockfilePath, ``);
-
-      const gitattributesLines = [
-        `/.yarn/** linguist-vendored`,
-      ];
-
-      const gitattributesBody = gitattributesLines.map(line => {
-        return `${line}\n`;
-      }).join(``);
-
-      const gitattributesPath = ppath.join(this.context.cwd, `.gitattributes` as Filename);
-      if (!xfs.existsSync(gitattributesPath))
-        await xfs.writeFilePromise(gitattributesPath, gitattributesBody);
+      if (!xfs.existsSync(lockfilePath))
+        await xfs.writeFilePromise(lockfilePath, ``);
 
       const gitignoreLines = [
         `/.yarn/*`,
-        `!/.yarn/releases`,
+        `!/.yarn/patches`,
         `!/.yarn/plugins`,
+        `!/.yarn/releases`,
         `!/.yarn/sdks`,
         ``,
         `# Swap the comments on the following lines if you don't wish to use zero-installs`,
@@ -203,7 +201,7 @@ export default class InitCommand extends BaseCommand {
           endOfLine: `lf`,
           insertFinalNewline: true,
         },
-        [`*.{js,json,.yml}`]: {
+        [`*.{js,json,yml}`]: {
           charset: `utf-8`,
           indentStyle: `space`,
           indentSize: 2,
@@ -225,9 +223,11 @@ export default class InitCommand extends BaseCommand {
       if (!xfs.existsSync(editorConfigPath))
         await xfs.writeFilePromise(editorConfigPath, editorConfigBody);
 
-      await execUtils.execvp(`git`, [`init`], {
-        cwd: this.context.cwd,
-      });
+      if (!xfs.existsSync(ppath.join(this.context.cwd, `.git` as Filename))) {
+        await execUtils.execvp(`git`, [`init`], {
+          cwd: this.context.cwd,
+        });
+      }
     }
   }
 }

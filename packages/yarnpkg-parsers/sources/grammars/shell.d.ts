@@ -17,8 +17,12 @@ export type Argument =
   | RedirectArgument
   | ValueArgument;
 
-export type RedirectArgument =
-  | {type: `redirection`, subtype: `>` | `<` | `>>` | `<<<`, args: Array<ValueArgument>};
+export type RedirectArgument = {
+  type: `redirection`,
+  subtype: `>` | `<` | '>&' | '<&' | `>>` | `<<<`,
+  fd: number | null,
+  args: Array<ValueArgument>
+};
 
 export type ValueArgument =
   | {type: `argument`, segments: Array<ArgumentSegment>};
@@ -64,7 +68,10 @@ export type CommandLineThen = {
   line: CommandLine,
 };
 
-export type ShellLine = Array<CommandLine>;
+export type ShellLine = Array<{
+  type: ';' | '&',
+  command: CommandLine,
+}>;
 
 export type ArithmeticPrimary = {
   type: `number`,

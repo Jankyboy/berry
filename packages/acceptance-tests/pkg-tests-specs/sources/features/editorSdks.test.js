@@ -26,7 +26,7 @@ describe(`Features`, () => {
         });
 
         await run(`install`);
-        await pnpify([`--sdk`, `base`], path);
+        await sdks([`base`], path);
 
         const rawOutput = await noPnpNode([`./.yarn/sdks/eslint/bin/eslint.js`], path);
         const jsonOutput = JSON.parse(rawOutput);
@@ -63,10 +63,10 @@ describe(`Features`, () => {
         });
 
         await run(`install`);
-        await pnpify([`--sdk`, `base`], path);
+        await sdks([`base`], path);
 
         await run(`install`, {nodeLinker: `node-modules`});
-        expect(xfs.existsSync(ppath.join(path, `.pnp.js`))).toEqual(false);
+        expect(xfs.existsSync(ppath.join(path, `.pnp.cjs`))).toEqual(false);
 
         const rawOutput = await noPnpNode([`./.yarn/sdks/eslint/bin/eslint.js`], path);
         const jsonOutput = JSON.parse(rawOutput);
@@ -147,6 +147,11 @@ describe(`Features`, () => {
             .replace(/\\/g, `/`)
             .replace(/^\/?/, `/`);
 
+          // Same thing, but this file has virtual instances.
+          const yarnpkgCli = npath.normalize(npath.join(__dirname, `../../../../yarnpkg-cli/sources/index.ts`))
+            .replace(/\\/g, `/`)
+            .replace(/^\/?/, `/`);
+
           // Some sanity check to make sure everything is A-OK
           expect(lodashTypeDef).toContain(`.zip`);
 
@@ -161,13 +166,20 @@ describe(`Features`, () => {
             seq: 1,
             type: `request`,
             command: `typeDefinition`,
+            arguments: {file: ourUtilityFile, line: 7, offset: 9},
+          });
+
+          await runAndWait(yarnpkgCli, {
+            seq: 2,
+            type: `request`,
+            command: `typeDefinition`,
             arguments: {file: ourUtilityFile, line: 6, offset: 9},
           });
         } finally {
           child.stdin.end();
         }
       },
-      45000
+      45000,
     );
   });
 });
@@ -203,9 +215,9 @@ const noPnpNode = async (args, cwd) => {
   });
 };
 
-const pnpify = async (args, cwd) => {
+const sdks = async (args, cwd) => {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [require.resolve(`@yarnpkg/monorepo/scripts/run-pnpify.js`), ...args], {
+    const child = spawn(process.execPath, [require.resolve(`@yarnpkg/monorepo/scripts/run-sdks.js`), ...args], {
       cwd: npath.fromPortablePath(cwd),
       stdio: `ignore`,
     });

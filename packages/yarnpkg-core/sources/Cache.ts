@@ -1,6 +1,7 @@
 import {FakeFS, LazyFS, NodeFS, ZipFS, PortablePath, Filename, AliasFS} from '@yarnpkg/fslib';
 import {ppath, xfs, DEFAULT_COMPRESSION_LEVEL}                          from '@yarnpkg/fslib';
 import {getLibzipPromise}                                               from '@yarnpkg/libzip';
+import {randomBytes}                                                    from 'crypto';
 import fs                                                               from 'fs';
 
 import {Configuration}                                                  from './Configuration';
@@ -11,7 +12,7 @@ import * as miscUtils                                                   from './
 import * as structUtils                                                 from './structUtils';
 import {LocatorHash, Locator}                                           from './types';
 
-const CACHE_VERSION = 7;
+const CACHE_VERSION = 8;
 
 export type FetchFromCacheOptions = {
   checksums: Map<LocatorHash, Locator>,
@@ -39,6 +40,12 @@ export class Cache {
   public readonly cacheKey: string;
 
   private mutexes: Map<LocatorHash, Promise<readonly [PortablePath, string]>> = new Map();
+
+  /**
+   * To ensure different instances of `Cache` doesn't end up copying to the same
+   * temporary file this random ID is appended to the filename.
+   */
+  private cacheId = `-${randomBytes(8).toString(`hex`)}.tmp`;
 
   static async find(configuration: Configuration, {immutable, check}: {immutable?: boolean, check?: boolean} = {}) {
     const cache = new Cache(configuration.get(`cacheFolder`), {configuration, immutable, check});
@@ -120,15 +127,24 @@ export class Cache {
   }
 
   async setup() {
+    // mkdir may cause write operations even when directories exist. To ensure that the cache can be successfully used
+    // on read-only filesystems, only run mkdir when not running in immutable mode.
     if (!this.configuration.get(`enableGlobalCache`)) {
-      await xfs.mkdirPromise(this.cwd, {recursive: true});
+      if (this.immutable) {
+        if (!await xfs.existsPromise(this.cwd)) {
+          throw new ReportError(MessageName.IMMUTABLE_CACHE, `Cache path does not exist.`);
+        }
+      } else {
+        await xfs.mkdirPromise(this.cwd, {recursive: true});
 
-      const gitignorePath = ppath.resolve(this.cwd, `.gitignore` as Filename);
-      const gitignoreExists = await xfs.existsPromise(gitignorePath);
+        const gitignorePath = ppath.resolve(this.cwd, `.gitignore` as Filename);
 
-      if (!gitignoreExists) {
-        await xfs.writeFilePromise(gitignorePath, `/.gitignore\n*.lock\n`);
+        await xfs.changeFilePromise(gitignorePath, `/.gitignore\n*.flock\n*.tmp\n`);
       }
+    }
+
+    if (this.mirrorCwd || !this.immutable) {
+      await xfs.mkdirPromise(this.mirrorCwd || this.cwd, {recursive: true});
     }
   }
 
@@ -195,14 +211,10 @@ export class Cache {
         const zipFs = await loader!();
         const realPath = zipFs.getRealPath();
         zipFs.saveAndClose();
-        return realPath;
+        return {source: `loader`, path: realPath} as const;
       }
 
-      const tempDir = await xfs.mktempPromise();
-      const tempPath = ppath.join(tempDir, this.getVersionFilename(locator));
-
-      await xfs.copyFilePromise(mirrorPath, tempPath, fs.constants.COPYFILE_FICLONE);
-      return tempPath;
+      return {source: `mirror`, path: mirrorPath} as const;
     };
 
     const loadPackage = async () => {
@@ -211,28 +223,37 @@ export class Cache {
       if (this.immutable)
         throw new ReportError(MessageName.IMMUTABLE_CACHE, `Cache entry required but missing for ${structUtils.prettyLocator(this.configuration, locator)}`);
 
-      const originalPath = await loadPackageThroughMirror();
-
-      await xfs.chmodPromise(originalPath, 0o644);
+      const {path: packagePath, source: packageSource} = await loadPackageThroughMirror();
 
       // Do this before moving the file so that we don't pollute the cache with corrupted archives
-      const checksum = await validateFile(originalPath);
+      const checksum = await validateFile(packagePath);
 
       const cachePath = this.getLocatorPath(locator, checksum);
       if (!cachePath)
         throw new Error(`Assertion failed: Expected the cache path to be available`);
 
-      return await this.writeFileWithLock(cachePath, async () => {
-        return await this.writeFileWithLock(mirrorPath, async () => {
-          // Doing a move is important to ensure atomic writes (todo: cross-drive?)
-          await xfs.movePromise(originalPath, cachePath);
+      await Promise.all([
+        // Copy the package into the mirror
+        (async () => {
+          if (packageSource !== `mirror` && mirrorPath !== null) {
+            const mirrorPathTemp = `${mirrorPath}${this.cacheId}` as PortablePath;
+            await xfs.copyFilePromise(packagePath, mirrorPathTemp, fs.constants.COPYFILE_FICLONE);
+            await xfs.chmodPromise(mirrorPathTemp, 0o644);
+            // Doing a rename is important to ensure the cache is atomic
+            await xfs.renamePromise(mirrorPathTemp, mirrorPath);
+          }
+        })(),
+        // Copy the package into the cache
+        (async () => {
+          const cachePathTemp = `${cachePath}${this.cacheId}` as PortablePath;
+          await xfs.copyFilePromise(packagePath, cachePathTemp, fs.constants.COPYFILE_FICLONE);
+          await xfs.chmodPromise(cachePathTemp, 0o644);
+          // Doing a rename is important to ensure the cache is atomic
+          await xfs.renamePromise(cachePathTemp, cachePath);
+        })(),
+      ]);
 
-          if (mirrorPath !== null)
-            await xfs.copyFilePromise(cachePath, mirrorPath, fs.constants.COPYFILE_FICLONE);
-
-          return [cachePath, checksum] as const;
-        });
-      });
+      return [cachePath, checksum] as const;
     };
 
     const loadPackageThroughMutex = async () => {
@@ -304,17 +325,6 @@ export class Cache {
     };
 
     return [aliasFs, releaseFs, checksum];
-  }
-
-  private async writeFileWithLock<T>(file: PortablePath | null, generator: () => Promise<T>) {
-    if (file === null)
-      return await generator();
-
-    await xfs.mkdirPromise(ppath.dirname(file), {recursive: true});
-
-    return await xfs.lockPromise(file, async () => {
-      return await generator();
-    });
   }
 }
 

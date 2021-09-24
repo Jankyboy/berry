@@ -11,14 +11,14 @@ module.exports = {
       name: `Getting started`,
       link: `/getting-started`,
     }, {
-      name: `Configuration`,
-      link: `/configuration`,
-    }, {
       name: `Features`,
       link: `/features`,
     }, {
       name: `CLI`,
       link: `/cli`,
+    }, {
+      name: `Configuration`,
+      link: `/configuration`,
     }, {
       name: `Advanced`,
       link: `/advanced`,
@@ -53,17 +53,6 @@ module.exports = {
       },
     },
     {
-      resolve: `gatsby-plugin-prefetch-google-fonts`,
-      options: {
-        fonts: [{
-          family: `Open Sans`,
-          variants: [`300`, `400`, `700`],
-        }, {
-          family: `PT Mono`,
-        }],
-      },
-    },
-    {
       resolve: `gatsby-source-filesystem`,
       options: {
         name: `images`,
@@ -76,12 +65,12 @@ module.exports = {
       resolve: `gatsby-plugin-manifest`,
       options: {
         name: `Yarn`,
-        /* eslint-disable @typescript-eslint/camelcase */
+        /* eslint-disable @typescript-eslint/naming-convention */
         short_name: `yarn`,
         start_url: `/`,
         background_color: `#2188b6`,
         theme_color: `#2188b6`,
-        /* eslint-enable @typescript-eslint/camelcase */
+        /* eslint-enable @typescript-eslint/naming-convention */
         display: `minimal-ui`,
         icon: `src/images/yarn-kitten.svg`,
       },
@@ -104,6 +93,10 @@ module.exports = {
           {
             namespace: `pnpify`,
             binary: `${__dirname}/../../scripts/run-pnpify.js`,
+          },
+          {
+            namespace: `sdks`,
+            binary: `${__dirname}/../../scripts/run-sdks.js`,
           },
           {
             namespace: `builder`,
@@ -132,7 +125,7 @@ module.exports = {
     {
       resolve: `gatsby-plugin-catch-links`,
       options: {
-        excludePattern: /^\/api$/,
+        excludePattern: /^\/(api|playground)$/,
       },
     },
     {

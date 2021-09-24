@@ -1,8 +1,9 @@
 import {BaseCommand}                                                                       from '@yarnpkg/cli';
 import {Configuration, MessageName, Project, ReportError, StreamReport, miscUtils, Report} from '@yarnpkg/core';
-import {formatUtils, httpUtils, structUtils}                                               from '@yarnpkg/core';
+import {YarnVersion, formatUtils, httpUtils, structUtils}                                  from '@yarnpkg/core';
 import {PortablePath, npath, ppath, xfs}                                                   from '@yarnpkg/fslib';
-import {Command, Usage}                                                                    from 'clipanion';
+import {Command, Option, Usage}                                                            from 'clipanion';
+import semver                                                                              from 'semver';
 import {URL}                                                                               from 'url';
 import {runInNewContext}                                                                   from 'vm';
 
@@ -10,8 +11,9 @@ import {getAvailablePlugins}                                                    
 
 // eslint-disable-next-line arca/no-default-export
 export default class PluginDlCommand extends BaseCommand {
-  @Command.String()
-  name!: string;
+  static paths = [
+    [`plugin`, `import`],
+  ];
 
   static usage: Usage = Command.Usage({
     category: `Plugin-related commands`,
@@ -42,7 +44,8 @@ export default class PluginDlCommand extends BaseCommand {
     ]],
   });
 
-  @Command.Path(`plugin`, `import`)
+  name = Option.String();
+
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
 
@@ -57,7 +60,7 @@ export default class PluginDlCommand extends BaseCommand {
       if (this.name.match(/^\.{0,2}[\\/]/) || npath.isAbsolute(this.name)) {
         const candidatePath = ppath.resolve(this.context.cwd, npath.toPortablePath(this.name));
 
-        report.reportInfo(MessageName.UNNAMED, `Reading ${formatUtils.pretty(configuration, candidatePath, `green`)}`);
+        report.reportInfo(MessageName.UNNAMED, `Reading ${formatUtils.pretty(configuration, candidatePath, formatUtils.Type.PATH)}`);
 
         pluginSpec = ppath.relative(project.cwd, candidatePath);
         pluginBuffer = await xfs.readFilePromise(candidatePath);
@@ -73,8 +76,11 @@ export default class PluginDlCommand extends BaseCommand {
           pluginSpec = this.name;
           pluginUrl = this.name;
         } else {
-          const ident = structUtils.parseIdent(this.name.replace(/^((@yarnpkg\/)?plugin-)?/, `@yarnpkg/plugin-`));
-          const identStr = structUtils.stringifyIdent(ident);
+          const locator = structUtils.parseLocator(this.name.replace(/^((@yarnpkg\/)?plugin-)?/, `@yarnpkg/plugin-`));
+          if (locator.reference !== `unknown` && !semver.valid(locator.reference))
+            throw new ReportError(MessageName.UNNAMED, `Official plugins only accept strict version references. Use an explicit URL if you wish to download them from another location.`);
+
+          const identStr = structUtils.stringifyIdent(locator);
           const data = await getAvailablePlugins(configuration);
 
           if (!Object.prototype.hasOwnProperty.call(data, identStr))
@@ -82,6 +88,12 @@ export default class PluginDlCommand extends BaseCommand {
 
           pluginSpec = identStr;
           pluginUrl = data[identStr].url;
+
+          if (locator.reference !== `unknown`) {
+            pluginUrl = pluginUrl.replace(/\/master\//, `/${identStr}/${locator.reference}/`);
+          } else if (YarnVersion !== null) {
+            pluginUrl = pluginUrl.replace(/\/master\//, `/@yarnpkg/cli/${YarnVersion}/`);
+          }
         }
 
         report.reportInfo(MessageName.UNNAMED, `Downloading ${formatUtils.pretty(configuration, pluginUrl, `green`)}`);
@@ -130,7 +142,7 @@ export async function savePlugin(pluginSpec: string, pluginBuffer: Buffer, {proj
         : entry;
 
       const pluginPath = ppath.resolve(project.cwd, npath.toPortablePath(userProvidedPath));
-      const {name} = miscUtils.dynamicRequire(npath.fromPortablePath(pluginPath));
+      const {name} = miscUtils.dynamicRequire(pluginPath);
 
       if (name !== pluginName) {
         plugins.push(entry);

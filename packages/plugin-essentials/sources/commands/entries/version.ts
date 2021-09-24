@@ -1,10 +1,13 @@
-import {CommandContext, YarnVersion} from '@yarnpkg/core';
-import {Command}                     from 'clipanion';
+import {BaseCommand} from '@yarnpkg/cli';
+import {YarnVersion} from '@yarnpkg/core';
 
 // eslint-disable-next-line arca/no-default-export
-export default class VersionCommand extends Command<CommandContext> {
-  @Command.Path(`-v`)
-  @Command.Path(`--version`)
+export default class VersionCommand extends BaseCommand {
+  static paths = [
+    [`-v`],
+    [`--version`],
+  ];
+
   async execute() {
     this.context.stdout.write(`${YarnVersion || `<unknown>`}\n`);
   }

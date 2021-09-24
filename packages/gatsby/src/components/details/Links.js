@@ -3,7 +3,6 @@ import React                           from 'react';
 
 import IcoBitbucket                    from '../../images/search/ico-bitbucket.svg';
 import IcoGit                          from '../../images/search/ico-git.svg';
-
 import IcoGithub                       from '../../images/search/ico-github.svg';
 import IcoGitlab                       from '../../images/search/ico-gitlab.svg';
 import IcoHome                         from '../../images/search/ico-home.svg';
@@ -20,7 +19,7 @@ const images = {
   yarn: IcoYarn,
   gitlab: IcoGitlab,
   bitbucket: IcoBitbucket,
-  // eslint-disable-next-line @typescript-eslint/camelcase
+  // eslint-disable-next-line @typescript-eslint/naming-convention
   generic_repo: IcoGit,
 };
 
@@ -40,7 +39,7 @@ const LinkBox = styled.span`
   }
 `;
 
-export const Link = ({site, url, display, tag = 'a'}) => {
+export const Link = ({site, url, display, tag = `a`}) => {
   const LinkElement = styled(tag)`
     display: flex;
     text-size-adjust: 100%;
@@ -75,12 +74,12 @@ const RepositoryLink = ({repository}) => {
     ) : null;
   }
 
-  const [provider] = repository.host.split('.');
+  const [provider] = repository.host.split(`.`);
 
   return (
     <Link
       site={provider}
-      url={`https://${host}/${encode(user)}/${encode(project)}${path || ''}`}
+      url={`https://${host}/${encode(user)}/${encode(project)}${path || ``}`}
       display={`${user}/${project}`}
     />
   );
@@ -102,7 +101,7 @@ export const Links = ({name, homepage, repository}) => (
       <Link
         site="homepage"
         url={homepage}
-        display={homepage.replace(/(http)?s?(:\/\/)?(www\.)?/, '')}
+        display={homepage.replace(/(http)?s?(:\/\/)?(www\.)?/, ``)}
       />
     ) : null}
     {repository ? <RepositoryLink repository={repository} /> : null}

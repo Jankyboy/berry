@@ -1,6 +1,6 @@
 {
   "name": "@yarnpkg/libui",
-  "version": "2.1.0",
+  "version": "2.2.0-rc.3",
   "license": "BSD-2-Clause",
   "sideEffects": false,
   "peerDependencies": {
@@ -9,14 +9,16 @@
   },
   "devDependencies": {
     "@types/react": "^16.8.0",
-    "ink": "^2.3.0",
+    "ink": "^3.0.8",
     "react": "^16.13.1"
   },
   "repository": {
     "type": "git",
-    "url": "ssh://git@github.com/yarnpkg/berry.git"
+    "url": "ssh://git@github.com/yarnpkg/berry.git",
+    "directory": "packages/yarnpkg-libui"
   },
   "dependencies": {
+    "chalk": "^3.0.0",
     "redux": "^4.0.0",
     "tslib": "^1.13.0"
   },
@@ -25,6 +27,7 @@
     "prepack": "yarn build:compile-inline \"$(pwd)\""
   },
   "engines": {
-    "node": ">=10.19.0"
-  }
+    "node": ">=12 <14 || 14.2 - 14.9 || >14.10.0"
+  },
+  "stableVersion": "2.1.2"
 }

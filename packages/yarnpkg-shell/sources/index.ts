@@ -1,15 +1,19 @@
-import {PortablePath, npath, ppath, FakeFS, NodeFS}                                  from '@yarnpkg/fslib';
-import {EnvSegment, ArithmeticExpression, ArithmeticPrimary}                         from '@yarnpkg/parsers';
-import {Argument, ArgumentSegment, CommandChain, CommandLine, ShellLine, parseShell} from '@yarnpkg/parsers';
-import {homedir}                                                                     from 'os';
+import {PortablePath, npath, ppath, FakeFS, NodeFS}                                                         from '@yarnpkg/fslib';
+import {Argument, ArgumentSegment, CommandChain, CommandLine, ShellLine, parseShell, stringifyCommandChain} from '@yarnpkg/parsers';
+import {EnvSegment, ArithmeticExpression, ArithmeticPrimary}                                                from '@yarnpkg/parsers';
+import chalk                                                                                                from 'chalk';
+import {homedir}                                                                                            from 'os';
+import {PassThrough, Readable, Writable}                                                                    from 'stream';
+import {promisify}                                                                                          from 'util';
 
-import {PassThrough, Readable, Writable}                                             from 'stream';
+import {ShellError}                                                                                         from './errors';
+import * as globUtils                                                                                       from './globUtils';
+import {createOutputStreamsWithPrefix, makeBuiltin, makeProcess}                                            from './pipe';
+import {Handle, ProcessImplementation, ProtectedStream, Stdio, start, Pipe}                                 from './pipe';
 
-import * as globUtils                                                                from './globUtils';
-import {Handle, ProcessImplementation, ProtectedStream, Stdio, start, Pipe}          from './pipe';
-import {makeBuiltin, makeProcess}                                                    from './pipe';
+const setTimeoutPromise = promisify(setTimeout);
 
-export {globUtils};
+export {globUtils, ShellError};
 
 export type Glob = globUtils.Glob;
 
@@ -50,7 +54,53 @@ export type ShellState = {
   stdout: Writable,
   stderr: Writable,
   variables: {[key: string]: string},
+  nextBackgroundJobIndex: number,
+  backgroundJobs: Array<Promise<unknown>>;
 };
+
+enum StreamType {
+  Readable = 0b01,
+  Writable = 0b10,
+}
+
+function getFileDescriptorStream(fd: number, type: StreamType, state: ShellState) {
+  const stream = new PassThrough({autoDestroy: true});
+
+  switch (fd) {
+    case Pipe.STDIN: {
+      if ((type & StreamType.Readable) === StreamType.Readable)
+        state.stdin.pipe(stream, {end: false});
+
+      if ((type & StreamType.Writable) === StreamType.Writable && state.stdin instanceof Writable) {
+        stream.pipe(state.stdin, {end: false});
+      }
+    } break;
+
+    case Pipe.STDOUT: {
+      if ((type & StreamType.Readable) === StreamType.Readable)
+        state.stdout.pipe(stream, {end: false});
+
+      if ((type & StreamType.Writable) === StreamType.Writable) {
+        stream.pipe(state.stdout, {end: false});
+      }
+    } break;
+
+    case Pipe.STDERR: {
+      if ((type & StreamType.Readable) === StreamType.Readable)
+        state.stderr.pipe(stream, {end: false});
+
+      if ((type & StreamType.Writable) === StreamType.Writable) {
+        stream.pipe(state.stderr, {end: false});
+      }
+    } break;
+
+    default: {
+      throw new ShellError(`Bad file descriptor: "${fd}"`);
+    }
+  }
+
+  return stream;
+}
 
 function cloneState(state: ShellState, mergeWith: Partial<ShellState> = {}) {
   const newState = {...state, ...mergeWith};
@@ -80,6 +130,10 @@ const BUILTINS = new Map<string, ShellBuiltin>([
     return 0;
   }],
 
+  [`:`, async (args: Array<string>, opts: ShellOptions, state: ShellState) => {
+    return 0;
+  }],
+
   [`true`, async (args: Array<string>, opts: ShellOptions, state: ShellState) => {
     return 0;
   }],
@@ -97,6 +151,22 @@ const BUILTINS = new Map<string, ShellBuiltin>([
     return 0;
   }],
 
+  [`sleep`, async ([time]: Array<string>, opts: ShellOptions, state: ShellState) => {
+    if (typeof time === `undefined`) {
+      state.stderr.write(`sleep: missing operand\n`);
+      return 1;
+    }
+
+    // TODO: make it support unit suffixes
+    const seconds = Number(time);
+    if (Number.isNaN(seconds)) {
+      state.stderr.write(`sleep: invalid time interval '${time}'\n`);
+      return 1;
+    }
+
+    return await setTimeoutPromise(1000 * seconds, 0);
+  }],
+
   [`__ysh_run_procedure`, async (args: Array<string>, opts: ShellOptions, state: ShellState) => {
     const procedure = state.procedures[args[0]];
 
@@ -112,15 +182,45 @@ const BUILTINS = new Map<string, ShellBuiltin>([
   [`__ysh_set_redirects`, async (args: Array<string>, opts: ShellOptions, state: ShellState) => {
     let stdin = state.stdin;
     let stdout = state.stdout;
-    const stderr = state.stderr;
+    let stderr = state.stderr;
 
     const inputs: Array<() => Readable> = [];
     const outputs: Array<Writable> = [];
+    const errors: Array<Writable> = [];
 
     let t = 0;
 
     while (args[t] !== `--`) {
-      const type = args[t++];
+      const key = args[t++];
+      const {type, fd} = JSON.parse(key);
+
+      const pushInput = (readableFactory: () => Readable) => {
+        switch (fd) {
+          case null:
+          case 0: {
+            inputs.push(readableFactory);
+          } break;
+
+          default:
+            throw new Error(`Unsupported file descriptor: "${fd}"`);
+        }
+      };
+
+      const pushOutput = (writable: Writable) => {
+        switch (fd) {
+          case null:
+          case 1: {
+            outputs.push(writable);
+          } break;
+
+          case 2: {
+            errors.push(writable);
+          } break;
+
+          default:
+            throw new Error(`Unsupported file descriptor: "${fd}"`);
+        }
+      };
 
       const count = Number(args[t++]);
       const last = t + count;
@@ -128,12 +228,12 @@ const BUILTINS = new Map<string, ShellBuiltin>([
       for (let u = t; u < last; ++t, ++u) {
         switch (type) {
           case `<`: {
-            inputs.push(() => {
+            pushInput(() => {
               return opts.baseFs.createReadStream(ppath.resolve(state.cwd, npath.toPortablePath(args[u])));
             });
           } break;
           case `<<<`: {
-            inputs.push(() => {
+            pushInput(() => {
               const input = new PassThrough();
               process.nextTick(() => {
                 input.write(`${args[u]}\n`);
@@ -142,12 +242,34 @@ const BUILTINS = new Map<string, ShellBuiltin>([
               return input;
             });
           } break;
-          case `>`: {
-            outputs.push(opts.baseFs.createWriteStream(ppath.resolve(state.cwd, npath.toPortablePath(args[u]))));
+          case `<&`: {
+            pushInput(() => getFileDescriptorStream(Number(args[u]), StreamType.Readable, state));
           } break;
+
+          case `>`:
           case `>>`: {
-            outputs.push(opts.baseFs.createWriteStream(ppath.resolve(state.cwd, npath.toPortablePath(args[u])), {flags: `a`}));
+            const outputPath = ppath.resolve(state.cwd, npath.toPortablePath(args[u]));
+            if (outputPath === `/dev/null`) {
+              pushOutput(
+                new Writable({
+                  autoDestroy: true,
+                  emitClose: true,
+                  write(chunk, encoding, callback) {
+                    setImmediate(callback);
+                  },
+                }),
+              );
+            } else {
+              pushOutput(opts.baseFs.createWriteStream(outputPath, type === `>>` ? {flags: `a`} : undefined));
+            }
           } break;
+          case `>&`: {
+            pushOutput(getFileDescriptorStream(Number(args[u]), StreamType.Writable, state));
+          } break;
+
+          default: {
+            throw new Error(`Assertion failed: Unsupported redirection type: "${type}"`);
+          }
         }
       }
     }
@@ -180,6 +302,15 @@ const BUILTINS = new Map<string, ShellBuiltin>([
       }
     }
 
+    if (errors.length > 0) {
+      const pipe = new PassThrough();
+      stderr = pipe;
+
+      for (const error of errors) {
+        pipe.pipe(error);
+      }
+    }
+
     const exitCode = await start(makeCommandAction(args.slice(t + 1), opts, state), {
       stdin: new ProtectedStream<Readable>(stdin),
       stdout: new ProtectedStream<Writable>(stdout),
@@ -189,11 +320,28 @@ const BUILTINS = new Map<string, ShellBuiltin>([
     // Close all the outputs (since the shell never closes the output stream)
     await Promise.all(outputs.map(output => {
       // Wait until the output got flushed to the disk
-      return new Promise<void>(resolve => {
+      return new Promise<void>((resolve, reject) => {
+        output.on(`error`, error => {
+          reject(error);
+        });
         output.on(`close`, () => {
           resolve();
         });
         output.end();
+      });
+    }));
+
+    // Close all the errors (since the shell never closes the error stream)
+    await Promise.all(errors.map(err => {
+      // Wait until the error got flushed to the disk
+      return new Promise<void>((resolve, reject) => {
+        err.on(`error`, error => {
+          reject(error);
+        });
+        err.on(`close`, () => {
+          resolve();
+        });
+        err.end();
       });
     }));
 
@@ -282,23 +430,38 @@ async function evaluateVariable(segment: ArgumentSegment & {type: `variable`}, o
     default: {
       const argIndex = parseInt(segment.name, 10);
 
+      let raw;
       if (Number.isFinite(argIndex)) {
         if (argIndex >= 0 && argIndex < opts.args.length) {
-          push(opts.args[argIndex]);
+          raw = opts.args[argIndex];
         } else if (segment.defaultValue) {
-          push((await interpolateArguments(segment.defaultValue, opts, state)).join(` `));
+          raw = (await interpolateArguments(segment.defaultValue, opts, state)).join(` `);
         } else {
-          throw new Error(`Unbound argument #${argIndex}`);
+          throw new ShellError(`Unbound argument #${argIndex}`);
         }
       } else {
         if (Object.prototype.hasOwnProperty.call(state.variables, segment.name)) {
-          push(state.variables[segment.name]);
+          raw = state.variables[segment.name];
         } else if (Object.prototype.hasOwnProperty.call(state.environment, segment.name)) {
-          push(state.environment[segment.name]);
+          raw = state.environment[segment.name];
         } else if (segment.defaultValue) {
-          push((await interpolateArguments(segment.defaultValue, opts, state)).join(` `));
+          raw = (await interpolateArguments(segment.defaultValue, opts, state)).join(` `);
         } else {
-          throw new Error(`Unbound variable "${segment.name}"`);
+          throw new ShellError(`Unbound variable "${segment.name}"`);
+        }
+      }
+
+      if (segment.quoted) {
+        push(raw);
+      } else {
+        const parts = split(raw);
+
+        for (let t = 0; t < parts.length - 1; ++t)
+          pushAndClose(parts[t]);
+
+        const part = parts[parts.length - 1];
+        if (typeof part !== `undefined`) {
+          push(part);
         }
       }
     } break;
@@ -315,6 +478,7 @@ const operators = {
 async function evaluateArithmetic(arithmetic: ArithmeticExpression, opts: ShellOptions, state: ShellState): Promise<number> {
   if (arithmetic.type === `number`) {
     if (!Number.isInteger(arithmetic.value)) {
+      // ZSH allows non-integers, while bash throws at the parser level (unrecoverable)
       throw new Error(`Invalid number: "${arithmetic.value}", only integers are allowed`);
     } else {
       return arithmetic.value;
@@ -359,11 +523,13 @@ async function interpolateArguments(commandArgs: Array<Argument>, opts: ShellOpt
     close();
   };
 
-  const redirect = (type: string, target: string) => {
-    let targets = redirections.get(type);
+  const redirect = (type: string, fd: number | null, target: string) => {
+    const key = JSON.stringify({type, fd});
+
+    let targets = redirections.get(key);
 
     if (typeof targets === `undefined`)
-      redirections.set(type, targets = []);
+      redirections.set(key, targets = []);
 
     targets.push(target);
   };
@@ -375,7 +541,7 @@ async function interpolateArguments(commandArgs: Array<Argument>, opts: ShellOpt
       case `redirection`: {
         const interpolatedArgs = await interpolateArguments(commandArg.args, opts, state);
         for (const interpolatedArg of interpolatedArgs) {
-          redirect(commandArg.subtype, interpolatedArg);
+          redirect(commandArg.subtype, commandArg.fd, interpolatedArg);
         }
       } break;
 
@@ -422,11 +588,16 @@ async function interpolateArguments(commandArgs: Array<Argument>, opts: ShellOpt
     if (isGlob) {
       const pattern = interpolated.pop();
       if (typeof pattern === `undefined`)
-        throw new Error(`Assertion failed: Expected a glob pattern to have been set.`);
+        throw new Error(`Assertion failed: Expected a glob pattern to have been set`);
 
       const matches = await opts.glob.match(pattern, {cwd: state.cwd, baseFs: opts.baseFs});
-      if (matches.length === 0)
-        throw new Error(`No file matches found: "${pattern}". Note: Glob patterns currently only support files that exist on the filesystem (Help Wanted)`);
+      if (matches.length === 0) {
+        const braceExpansionNotice = globUtils.isBraceExpansion(pattern)
+          ? `. Note: Brace expansion of arbitrary strings isn't currently supported. For more details, please read this issue: https://github.com/yarnpkg/berry/issues/22`
+          : ``;
+
+        throw new ShellError(`No matches found: "${pattern}"${braceExpansionNotice}`);
+      }
 
       for (const match of matches.sort()) {
         pushAndClose(match);
@@ -437,8 +608,8 @@ async function interpolateArguments(commandArgs: Array<Argument>, opts: ShellOpt
   if (redirections.size > 0) {
     const redirectionArgs: Array<string> = [];
 
-    for (const [subtype, targets] of redirections.entries())
-      redirectionArgs.splice(redirectionArgs.length, 0, subtype, String(targets.length), ...targets);
+    for (const [key, targets] of redirections.entries())
+      redirectionArgs.splice(redirectionArgs.length, 0, key, String(targets.length), ...targets);
 
     interpolated.splice(0, 0, `__ysh_set_redirects`, ...redirectionArgs, `--`);
   }
@@ -476,11 +647,23 @@ function makeCommandAction(args: Array<string>, opts: ShellOptions, state: Shell
     throw new Error(`Assertion failed: A builtin should exist for "${name}"`);
 
   return makeBuiltin(async ({stdin, stdout, stderr}) => {
+    const {
+      stdin: initialStdin,
+      stdout: initialStdout,
+      stderr: initialStderr,
+    } = state;
+
     state.stdin = stdin;
     state.stdout = stdout;
     state.stderr = stderr;
 
-    return await builtin(rest, opts, state);
+    try {
+      return await builtin(rest, opts, state);
+    } finally {
+      state.stdin = initialStdin;
+      state.stdout = initialStdout;
+      state.stderr = initialStderr;
+    }
   });
 }
 
@@ -518,7 +701,7 @@ function makeActionFromProcedure(procedure: ProcessImplementation, args: Array<s
   }
 }
 
-async function executeCommandChain(node: CommandChain, opts: ShellOptions, state: ShellState) {
+async function executeCommandChainImpl(node: CommandChain, opts: ShellOptions, state: ShellState) {
   let current: CommandChain | null = node;
   let pipeType = null;
 
@@ -580,7 +763,7 @@ async function executeCommandChain(node: CommandChain, opts: ShellOptions, state
       });
     } else {
       if (execution === null)
-        throw new Error(`The execution pipeline should have been setup`);
+        throw new Error(`Assertion failed: The execution pipeline should have been setup`);
 
       // Otherwise, depending on the exaxct pipe type, we either pipe stdout
       // only or stdout and stderr
@@ -609,11 +792,43 @@ async function executeCommandChain(node: CommandChain, opts: ShellOptions, state
   return await execution.run();
 }
 
+async function executeCommandChain(node: CommandChain, opts: ShellOptions, state: ShellState, {background = false}: {background?: boolean} = {}) {
+  function getColorizer(index: number) {
+    const colors = [`#2E86AB`, `#A23B72`, `#F18F01`, `#C73E1D`, `#CCE2A3`];
+    const colorName = colors[index % colors.length];
+
+    return chalk.hex(colorName);
+  }
+
+  if (background) {
+    const index = state.nextBackgroundJobIndex++;
+    const colorizer = getColorizer(index);
+    const rawPrefix = `[${index}]`;
+    const prefix = colorizer(rawPrefix);
+
+    const {stdout, stderr} = createOutputStreamsWithPrefix(state, {prefix});
+
+    state.backgroundJobs.push(
+      executeCommandChainImpl(node, opts, cloneState(state, {stdout, stderr}))
+        .catch(error => stderr.write(`${error.message}\n`))
+        .finally(() => {
+          if ((state.stdout as any).isTTY) {
+            state.stdout.write(`Job ${prefix}, '${colorizer(stringifyCommandChain(node))}' has ended\n`);
+          }
+        }),
+    );
+
+    return 0;
+  }
+
+  return await executeCommandChainImpl(node, opts, state);
+}
+
 /**
  * Execute a command line. A command line is a list of command shells linked
  * together thanks to the use of either of the `||` or `&&` operators.
  */
-async function executeCommandLine(node: CommandLine, opts: ShellOptions, state: ShellState): Promise<number> {
+async function executeCommandLine(node: CommandLine, opts: ShellOptions, state: ShellState, {background = false}: {background?: boolean} = {}): Promise<number> {
   let code!: number;
   const setCode = (newCode: number) => {
     code = newCode;
@@ -623,7 +838,20 @@ async function executeCommandLine(node: CommandLine, opts: ShellOptions, state: 
     state.variables[`?`] = String(newCode);
   };
 
-  setCode(await executeCommandChain(node.chain, opts, state));
+  const executeChain = async (line: CommandLine) => {
+    try {
+      return await executeCommandChain(line.chain, opts, state, {background: background && typeof line.then === `undefined`});
+    } catch (error) {
+      if (!(error instanceof ShellError))
+        throw error;
+
+      state.stderr.write(`${error.message}\n`);
+
+      return 1;
+    }
+  };
+
+  setCode(await executeChain(node));
 
   // We use a loop because we must make sure that we respect
   // the left associativity of lists, as per the bash spec.
@@ -637,18 +865,18 @@ async function executeCommandLine(node: CommandLine, opts: ShellOptions, state: 
     switch (node.then.type) {
       case `&&`: {
         if (code === 0) {
-          setCode(await executeCommandChain(node.then.line.chain, opts, state));
+          setCode(await executeChain(node.then.line));
         }
       } break;
 
       case `||`: {
         if (code !== 0) {
-          setCode(await executeCommandChain(node.then.line.chain, opts, state));
+          setCode(await executeChain(node.then.line));
         }
       } break;
 
       default: {
-        throw new Error(`Unsupported command type: "${node.then.type}"`);
+        throw new Error(`Assertion failed: Unsupported command type: "${node.then.type}"`);
       } break;
     }
 
@@ -659,10 +887,13 @@ async function executeCommandLine(node: CommandLine, opts: ShellOptions, state: 
 }
 
 async function executeShellLine(node: ShellLine, opts: ShellOptions, state: ShellState) {
+  const originalBackgroundJobs = state.backgroundJobs;
+  state.backgroundJobs = [];
+
   let rightMostExitCode = 0;
 
-  for (const command of node) {
-    rightMostExitCode = await executeCommandLine(command, opts, state);
+  for (const {command, type} of node) {
+    rightMostExitCode = await executeCommandLine(command, opts, state, {background: type === `&`});
 
     // If the execution aborted (usually through "exit"), we must bailout
     if (state.exitCode !== null)
@@ -673,10 +904,13 @@ async function executeShellLine(node: ShellLine, opts: ShellOptions, state: Shel
     state.variables[`?`] = String(rightMostExitCode);
   }
 
+  await Promise.all(state.backgroundJobs);
+  state.backgroundJobs = originalBackgroundJobs;
+
   return rightMostExitCode;
 }
 
-function locateArgsVariableInSegment(segment: ArgumentSegment|ArithmeticPrimary): boolean {
+function locateArgsVariableInSegment(segment: ArgumentSegment | ArithmeticPrimary): boolean {
   switch (segment.type) {
     case `variable`: {
       return segment.name === `@` || segment.name === `#` || segment.name === `*` || Number.isFinite(parseInt(segment.name, 10)) || (`defaultValue` in segment && !!segment.defaultValue && segment.defaultValue.some(arg => locateArgsVariableInArgument(arg)));
@@ -707,7 +941,7 @@ function locateArgsVariableInArgument(arg: Argument): boolean {
     } break;
 
     default:
-      throw new Error(`Unreacheable`);
+      throw new Error(`Assertion failed: Unsupported argument type: "${(arg as Argument).type}"`);
   }
 }
 
@@ -727,7 +961,7 @@ function locateArgsVariableInArithmetic(arg: ArithmeticExpression): boolean {
 }
 
 function locateArgsVariable(node: ShellLine): boolean {
-  return node.some(command => {
+  return node.some(({command}) => {
     while (command) {
       let chain = command.chain;
 
@@ -798,7 +1032,7 @@ export async function execute(command: string, args: Array<string> = [], {
   // If the shell line doesn't use the args, inject it at the end of the
   // right-most command
   if (!locateArgsVariable(ast) && ast.length > 0 && args.length > 0) {
-    let command = ast[ast.length - 1];
+    let {command} = ast[ast.length - 1];
     while (command.then)
       command = command.then.line;
 
@@ -838,5 +1072,7 @@ export async function execute(command: string, args: Array<string> = [], {
     variables: Object.assign({}, variables, {
       [`?`]: 0,
     }),
+    nextBackgroundJobIndex: 1,
+    backgroundJobs: [],
   });
 }

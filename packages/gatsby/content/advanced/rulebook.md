@@ -2,6 +2,7 @@
 category: advanced
 path: /advanced/rulebook
 title: "Rulebook"
+description: An in-depth rulebook of best-practices and recommendations regarding dependencies.
 ---
 
 Writing portable packages is incredibly important, as it ensures that your users will benefit from an optimal experience regardless of their package manager.
@@ -86,7 +87,7 @@ Note that while `createRequire` is Node 12+, a polyfill exists under the name [`
 
 **Why?** The `.bin` folder is an implementation detail, and may not exist at all depending on the install strategy.
 
-**Solution:** If you're writing a [script](http://localhost:8000/configuration/manifest#scripts), you can just refer to the binary by its name! So instead of `node_modules/.bin/jest -w`, prefer just writing `jest -w` which will work just fine. If for some reason `jest` isn't available, check that the current package properly [defines it as a dependency](#a-package-should-only-require-what-it-lists-in-its-dependencies).
+**Solution:** If you're writing a [script](/configuration/manifest#scripts), you can just refer to the binary by its name! So instead of `node_modules/.bin/jest -w`, prefer just writing `jest -w` which will work just fine. If for some reason `jest` isn't available, check that the current package properly [defines it as a dependency](#a-package-should-only-require-what-it-lists-in-its-dependencies).
 
 Sometimes you may find yourself having slightly more complex needs, for example if you wish to spawn a script with specific Node flags. Depending on the context we recommend passing options via the [`NODE_OPTIONS` environment variable](https://nodejs.org/api/cli.html#cli_node_options_options) rather than the CLI, but if that's not an option you can use `yarn bin <name>` to get the specified binary path:
 
@@ -122,6 +123,6 @@ If you absolutely need to write into your package's source folder (but really, w
 
 ## Packages should use the `prepack` script to generate dist files before publishing
 
-**Why?** The original npm supported [many different scripts](https://docs.npmjs.com/misc/scripts). So much, in fact, that it became very difficult to know which script one would want to use in which context. In particular, the very subtle differences between the `prepack`, `prepare`, `prepublish`, and `prepublish-only` scripts led many to use the wrong script in the wrong context. For this reason, Yarn 2 deprecated most of the scripts and consolidated then around a restricted set of portable scripts.
+**Why?** The original npm supported [many different scripts](https://docs.npmjs.com/misc/scripts). So much, in fact, that it became very difficult to know which script one would want to use in which context. In particular, the very subtle differences between the `prepack`, `prepare`, `prepublish`, and `prepublish-only` scripts led many to use the wrong script in the wrong context. For this reason, Yarn 2 deprecated most of the scripts and consolidated them around a restricted set of portable scripts.
 
 **Solution:** Always use the `prepack` script if you wish to generate dist artifacts before publishing your package. It will get called before calling `yarn pack` (which itself is called before calling `yarn npm publish`), when cloning your git repository as a git dependency, and any time you will run `yarn prepack`. As for `prepublish`, never use it with side effects - its only use should be to run tests before the publish step.

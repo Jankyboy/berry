@@ -4,9 +4,11 @@ on:
     - master
     paths:
     - 'packages/plugin-compat/**'
+    - '!packages/plugin-compat/sources/extensions.ts'
   pull_request:
     paths:
     - 'packages/plugin-compat/**'
+    - '!packages/plugin-compat/sources/extensions.ts'
 
 name: 'plugin-compat'
 jobs:
@@ -17,10 +19,10 @@ jobs:
     steps:
     - uses: actions/checkout@master
 
-    - name: 'Use Node.js 10.x'
+    - name: 'Install Node'
       uses: actions/setup-node@master
       with:
-        node-version: 10.x
+        node-version: 14.x
 
     - name: 'Build the standard bundle'
       run: |

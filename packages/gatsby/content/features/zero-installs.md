@@ -2,6 +2,7 @@
 category: features
 path: /features/zero-installs
 title: 'Zero-Installs'
+description: An overview of Yarn's Zero-Installs, a feature provided by PnP which enables storing all dependencies inside the project's repository.
 ---
 
 While not a feature in itself, the term "Zero Install" encompasses a lot of Yarn features tailored around one specific goal - to make your projects as stable and fast as possible by removing the main source of entropy from the equation: Yarn itself.
@@ -28,9 +29,9 @@ In order to make a project zero-install, you must be able to use it as soon as y
 
   - Again, this whole workflow is optional. If at some point you decide that in the end you prefer to keep using a global cache, just toggle on `enableGlobalCache` in the [yarnrc settings](/configuration/yarnrc#enableGlobalCache) and it'll be back to normal.
 
-- When running `yarn install`, Yarn will generate a `.pnp.js` file. Add it to your repository as well - it contains the dependency tree that Node will use to load your packages.
+- When running `yarn install`, Yarn will generate a `.pnp.cjs` file. Add it to your repository as well - it contains the dependency tree that Node will use to load your packages.
 
-- Depending on whether your dependencies have install scripts or not (we advise you to avoid it if you can and prefer wasm-powered alternatives) you may also want to add the `.yarn/unplugged` and `.yarn/build-state.yml` entries.
+- Depending on whether your dependencies have install scripts or not (we advise you to avoid it if you can and prefer wasm-powered alternatives) you may also want to add the `.yarn/unplugged` entries.
 
 And that's it! Push your changes to your repository, checkout a new one somewhere, and check whether running `yarn start` (or whatever other script you'd normally use) works.
 

@@ -1,8 +1,9 @@
-import {Configuration, Locator, execUtils, structUtils} from '@yarnpkg/core';
-import {npath, xfs}                                     from '@yarnpkg/fslib';
-import querystring                                      from 'querystring';
-import semver                                           from 'semver';
-import urlLib                                           from 'url';
+import {Configuration, Locator, execUtils, structUtils, httpUtils, semverUtils} from '@yarnpkg/core';
+import {npath, xfs}                                                             from '@yarnpkg/fslib';
+import GitUrlParse                                                              from 'git-url-parse';
+import querystring                                                              from 'querystring';
+import semver                                                                   from 'semver';
+import urlLib                                                                   from 'url';
 
 function makeGitEnvironment() {
   return {
@@ -60,7 +61,7 @@ export function splitRepoUrl(url: string): RepoUrlParts {
       repo: url,
       treeish: {
         protocol: TreeishProtocols.Head,
-        request: `master`,
+        request: `HEAD`,
       },
       extra: {},
     };
@@ -89,7 +90,7 @@ export function splitRepoUrl(url: string): RepoUrlParts {
       request = extra[requestedProtocol]! as string;
     } else {
       protocol = TreeishProtocols.Head;
-      request = `master`;
+      request = `HEAD`;
     }
 
     for (const key of Object.values(TreeishProtocols))
@@ -102,10 +103,8 @@ export function splitRepoUrl(url: string): RepoUrlParts {
         [key: string]: string,
       },
     };
-  }
-
-  // Old-style: "#commit:abcdef" or "#abcdef"
-  else {
+  } else {
+    // Old-style: "#commit:abcdef" or "#abcdef"
     const colonIndex = subsequent.indexOf(`:`);
 
     let protocol: string | null;
@@ -170,12 +169,15 @@ export function normalizeLocator(locator: Locator) {
 }
 
 export async function lsRemote(repo: string, configuration: Configuration) {
-  if (!configuration.get(`enableNetwork`))
-    throw new Error(`Network access has been disabled by configuration (${repo})`);
+  const normalizedRepoUrl = normalizeRepoUrl(repo, {git: true});
+
+  const networkSettings = httpUtils.getNetworkSettings(`https://${GitUrlParse(normalizedRepoUrl).resource}`, {configuration});
+  if (!networkSettings.enableNetwork)
+    throw new Error(`Request to '${normalizedRepoUrl}' has been blocked because of your configuration settings`);
 
   let res: {stdout: string};
   try {
-    res = await execUtils.execvp(`git`, [`ls-remote`, `--refs`, normalizeRepoUrl(repo, {git: true})], {
+    res = await execUtils.execvp(`git`, [`ls-remote`, normalizedRepoUrl], {
       cwd: configuration.startingCwd,
       env: makeGitEnvironment(),
       strict: true,
@@ -187,7 +189,7 @@ export async function lsRemote(repo: string, configuration: Configuration) {
 
   const refs = new Map();
 
-  const matcher = /^([a-f0-9]{40})\t(refs\/[^\n]+)/gm;
+  const matcher = /^([a-f0-9]{40})\t([^\n]+)/gm;
   let match;
 
   while ((match = matcher.exec(res.stdout)) !== null)
@@ -213,7 +215,7 @@ export async function resolveUrl(url: string, configuration: Configuration) {
       }
 
       case TreeishProtocols.Head: {
-        const head = refs.get(`refs/heads/${request}`);
+        const head = refs.get(request === `HEAD` ? request : `refs/heads/${request}`);
         if (typeof head === `undefined`)
           throw new Error(`Unknown head ("${request}")`);
 
@@ -235,7 +237,8 @@ export async function resolveUrl(url: string, configuration: Configuration) {
       }
 
       case TreeishProtocols.Semver: {
-        if (!semver.validRange(request))
+        const validRange = semverUtils.validRange(request);
+        if (!validRange)
           throw new Error(`Invalid range ("${request}")`);
 
         const semverTags = new Map([...refs.entries()].filter(([ref]) => {
@@ -246,7 +249,7 @@ export async function resolveUrl(url: string, configuration: Configuration) {
           return entry[0] !== null;
         }));
 
-        const bestVersion = semver.maxSatisfying([...semverTags.keys()], request);
+        const bestVersion = semver.maxSatisfying([...semverTags.keys()], validRange);
         if (bestVersion === null)
           throw new Error(`No matching range ("${request}")`);
 
@@ -291,19 +294,20 @@ export async function resolveUrl(url: string, configuration: Configuration) {
 }
 
 export async function clone(url: string, configuration: Configuration) {
-  if (!configuration.get(`enableNetwork`))
-    throw new Error(`Network access has been disabled by configuration (${url})`);
-
   return await configuration.getLimit(`cloneConcurrency`)(async () => {
     const {repo, treeish: {protocol, request}} = splitRepoUrl(url);
     if (protocol !== `commit`)
       throw new Error(`Invalid treeish protocol when cloning`);
 
+    const normalizedRepoUrl = normalizeRepoUrl(repo, {git: true});
+    if (httpUtils.getNetworkSettings(`https://${GitUrlParse(normalizedRepoUrl).resource}`, {configuration}).enableNetwork === false)
+      throw new Error(`Request to '${normalizedRepoUrl}' has been blocked because of your configuration settings`);
+
     const directory = await xfs.mktempPromise();
     const execOpts = {cwd: directory, env: makeGitEnvironment(), strict: true};
 
     try {
-      await execUtils.execvp(`git`, [`clone`, `-c core.autocrlf=false`, normalizeRepoUrl(repo, {git: true}), npath.fromPortablePath(directory)], execOpts);
+      await execUtils.execvp(`git`, [`clone`, `-c core.autocrlf=false`, normalizedRepoUrl, npath.fromPortablePath(directory)], execOpts);
       await execUtils.execvp(`git`, [`checkout`, `${request}`], execOpts);
     } catch (error) {
       error.message = `Repository clone failed: ${error.message}`;

@@ -5,11 +5,12 @@
   "publisher": "arcanis",
   "displayName": "ZipFS - a zip file system",
   "description": "Allows to easily inspect and modify files stored within zip archives.",
+  "homepage": "https://github.com/yarnpkg/berry/blob/master/packages/vscode-zipfs",
   "icon": "icon.png",
-  "version": "2.2.1",
+  "version": "2.4.0-rc.3",
   "engines": {
-    "vscode": "^1.46.0",
-    "node": ">=10.19.0"
+    "vscode": "^1.54.0",
+    "node": ">=12 <14 || 14.2 - 14.9 || >14.10.0"
   },
   "categories": [
     "Other"
@@ -17,7 +18,10 @@
   "activationEvents": [
     "workspaceContains:**/*.zip",
     "onLanguage:zip",
-    "onFileSystem:zip"
+    "onFileSystem:zip",
+    "onCommand:zipfs.mountZipFile",
+    "onCommand:zipfs.mountZipEditor",
+    "onStartupFinished"
   ],
   "main": "./build/index.js",
   "sideEffects": false,
@@ -67,14 +71,14 @@
     }
   },
   "devDependencies": {
-    "@types/vscode": "^1.46.0",
-    "@yarnpkg/fslib": "workspace:^2.2.1",
-    "@yarnpkg/libzip": "workspace:^2.2.0",
-    "@yarnpkg/pnpify": "workspace:^2.2.1",
+    "@types/vscode": "^1.54.0",
+    "@yarnpkg/fslib": "workspace:^",
+    "@yarnpkg/libzip": "workspace:^",
+    "@yarnpkg/pnpify": "workspace:^",
     "ts-loader": "^7.0.5",
-    "typescript": "4.1.0-beta",
-    "vsce": "^1.76.1",
-    "webpack": "^5.0.0-beta.17",
+    "typescript": "^4.4.2",
+    "vsce": "^1.85.1",
+    "webpack": "^5.1.1",
     "webpack-cli": "^4.0.0-beta.8"
   },
   "scripts": {
@@ -82,15 +86,17 @@
     "package:vscode-zipfs": "run package",
     "package": "run vsce package --yarn",
     "build:vscode-zipfs": "run build",
-    "build": "run webpack-cli",
-    "watch": "run webpack-cli --watch --mode development",
+    "build": "webpack-cli",
+    "watch": "NODE_ENV=development webpack-cli --watch",
     "code": "code --extensionDevelopmentPath=\"$(pwd)\" \"$(pwd)\""
   },
   "repository": {
     "type": "git",
-    "url": "ssh://git@github.com/yarnpkg/berry.git"
+    "url": "ssh://git@github.com/yarnpkg/berry.git",
+    "directory": "packages/vscode-zipfs"
   },
   "dependencies": {
     "tslib": "^1.13.0"
-  }
+  },
+  "stableVersion": "2.3.0"
 }

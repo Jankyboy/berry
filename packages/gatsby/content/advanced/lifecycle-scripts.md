@@ -2,6 +2,7 @@
 category: advanced
 path: /advanced/lifecycle-scripts
 title: "Lifecycle Scripts"
+description: An overview of Yarn's supported lifecycle scripts.
 ---
 
 Packages can define in the `scripts` field of their manifest various actions that should be executed when the package manager executes a particular workflow. Here they are:
@@ -12,9 +13,9 @@ Packages can define in the `scripts` field of their manifest various actions tha
 
 - **postpack** is called right after `yarn pack`, whether the call succeeded or not. This is typically the place where you'll clean your working directory from the build artifacts (note that whether to actually clean them or not is purely optional).
 
-- **prepublish** is called before `yarn npm publish` and similar commands (even before the package has been packed). This is the place where you'll want to check that the project is in an ok state. Because it's only called on prepublish, **the prepublish hook shouldn't have side effects.** In particular don't transpile the package sources in prepublish, as people consuming directly your repository wouldn't be able to use your project.
+- **prepublish** is called before `yarn npm publish` and similar commands (even before the package has been packed). This is the place where you'll want to check that the project is in an ok state. Because it's only called on prepublish, **the prepublish hook shouldn't have side effects.** In particular don't transpile the package sources in prepublish, as people consuming directly your repository (such as through the [`git:` protocol](/features/protocols#git)) wouldn't be able to use your project.
 
-- **postinstall** is called after a package got successfully installed on the disk. It is guaranteed.
+- **postinstall** is called after a package's dependency tree changes are written to the disk -- e.g. after a dependency or transitive dependency is added, removed, or changed. It is guaranteed to be called in topological order (in other words, your dependencies' postinstalls will always run before yours). For backwards compatibility, **preinstall** and **install** are called as part of **postinstall**.
 
 Note that we don't support every single lifecycle script originally present in npm. This is a deliberate decision based on the observation that too many lifecycle scripts make it difficult to know which one to use in which circumstances, leading to confusion and mistakes. We are open to add the missing ones on a case-by-case basis if compelling use cases are provided.
 
@@ -31,3 +32,23 @@ Depending on your use case, here's how you can avoid postinstall scripts:
 - Native packages can be built to [WebAssembly](https://webassembly.org), which is already supported in Node 12 and beyond. On top of being portable and fast, WebAssembly packages also have the benefit to make your libraries available not only to Node but also to your browser users. And since their compilation is made upfront, your users won't be impacted by slow compilation time problems.
 
 - Project sustainability is a big topic, but the gist is that we don't think postinstall scripts are a viable solution. We however are committed to providing a specific field in the package.json that would signal to the package managers that a project would like to communicate its existence with the user in an integrated and respectful way.
+
+## Environment variables
+
+When running scripts and binaries, some environment variables are usually made available:
+
+- `$INIT_CWD` represents the directory from which the script has been invoked. This isn't the same as the cwd, which for scripts is always equal to the closest package root.
+
+- `$PROJECT_CWD` is the root of the project on the filesystem.
+
+- `$npm_package_name` is the name of the package that lists the script being executed.
+
+- `$npm_package_version` is its version.
+
+- `$npm_execpath` is the path to the Yarn binary.
+
+- `$npm_node_execpath` is the path to the Node binary.
+
+- `$npm_config_user_agent` is a string defining the Yarn version currently in use.
+
+- `$npm_lifecycle_event` is the name of the script or lifecycle event, if relevant.

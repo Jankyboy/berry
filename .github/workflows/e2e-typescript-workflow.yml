@@ -19,14 +19,19 @@ jobs:
     steps:
     - uses: actions/checkout@master
 
-    - name: 'Use Node.js 10.x'
+    - name: 'Install Node'
       uses: actions/setup-node@master
       with:
-        node-version: 10.x
+        node-version: 14.x
 
     - name: 'Build the standard bundle'
       run: |
         node ./scripts/run-yarn.js build:cli
+
+    - name: 'Checking some behaviors against the latest TypeScript'
+      run: |
+        yarn up typescript
+        yarn node ./scripts/test-typescript-patch.js
 
     - name: 'Installing all versions of TS'
       run: |

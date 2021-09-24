@@ -2,6 +2,8 @@
 
 A CLI tool designed for creating, building, and managing complex plugins.
 
+> This version of the builder is for creating plugins for Yarn 3.x. Yarn 3 plugins are not compatible with Yarn 2 installations, however Yarn 2 plugins are usually compatible with Yarn 3. If you wish to create plugins for Yarn 2, please use v2.x of the builder (`yarn add @yarnpkg/builder@^2`).
+
 ## Features
 
 - `builder new plugin` command for scaffolding new plugins
@@ -16,8 +18,8 @@ A CLI tool designed for creating, building, and managing complex plugins.
 
 ## Commands
 
-- [`build bundle`](/builder/cli/build/bundle) - Build the local bundle.
+- [`build bundle`](https://yarnpkg.com/builder/cli/build/bundle) - Build the local bundle.
 
-- [`build plugin`](/builder/cli/build/plugin) - Build a local plugin.
+- [`build plugin`](https://yarnpkg.com/builder/cli/build/plugin) - Build a local plugin.
 
-- [`new plugin`](/builder/cli/new/plugin) - Create a new plugin.
+- [`new plugin`](https://yarnpkg.com/builder/cli/new/plugin) - Create a new plugin.

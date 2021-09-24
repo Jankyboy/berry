@@ -1,11 +1,13 @@
 import {Descriptor, Plugin, SettingsType, Package, formatUtils} from '@yarnpkg/core';
 import {Workspace}                                              from '@yarnpkg/core';
+import {isCI}                                                   from 'ci-info';
 
 import add                                                      from './commands/add';
 import bin                                                      from './commands/bin';
 import cleanCache                                               from './commands/cache/clean';
 import getConfig                                                from './commands/config/get';
 import setConfig                                                from './commands/config/set';
+import unsetConfig                                              from './commands/config/unset';
 import config                                                   from './commands/config';
 import dedupe                                                   from './commands/dedupe';
 import clipanionEntry                                           from './commands/entries/clipanion';
@@ -13,6 +15,7 @@ import helpEntry                                                from './commands
 import runEntry                                                 from './commands/entries/run';
 import versionEntry                                             from './commands/entries/version';
 import exec                                                     from './commands/exec';
+import explainPeerRequirements                                  from './commands/explain/peerRequirements';
 import info                                                     from './commands/info';
 import install                                                  from './commands/install';
 import link                                                     from './commands/link';
@@ -29,13 +32,18 @@ import run                                                      from './commands
 import setResolutionPolicy                                      from './commands/set/resolution';
 import setVersionFromSources                                    from './commands/set/version/sources';
 import setVersionPolicy                                         from './commands/set/version';
+import unlink                                                   from './commands/unlink';
 import up                                                       from './commands/up';
 import why                                                      from './commands/why';
 import listWorkspaces                                           from './commands/workspaces/list';
 import workspace                                                from './commands/workspace';
+import * as dedupeUtils                                         from './dedupeUtils';
 import * as suggestUtils                                        from './suggestUtils';
 
-export {suggestUtils};
+export {
+  dedupeUtils,
+  suggestUtils,
+};
 
 export interface Hooks {
   afterWorkspaceDependencyAddition?: (
@@ -78,9 +86,9 @@ declare module '@yarnpkg/core' {
 const plugin: Plugin = {
   configuration: {
     enableImmutableInstalls: {
-      description: `If true, prevents the install command from modifying the lockfile`,
+      description: `If true (the default on CI), prevents the install command from modifying the lockfile`,
       type: SettingsType.BOOLEAN,
-      default: false,
+      default: isCI,
     },
 
     defaultSemverRangePrefix: {
@@ -94,6 +102,7 @@ const plugin: Plugin = {
     cleanCache,
     getConfig,
     setConfig,
+    unsetConfig,
     setResolutionPolicy,
     setVersionFromSources,
     setVersionPolicy,
@@ -107,9 +116,11 @@ const plugin: Plugin = {
     config,
     dedupe,
     exec,
+    explainPeerRequirements,
     info,
     install,
     link,
+    unlink,
     node,
     pluginImportSources,
     pluginImport,

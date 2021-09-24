@@ -1,48 +1,20 @@
 import {BaseCommand, WorkspaceRequiredError}                        from '@yarnpkg/cli';
 import {Cache, Configuration, Descriptor, LightReport, MessageName} from '@yarnpkg/core';
-import {Project, StreamReport, Workspace, Ident}                    from '@yarnpkg/core';
+import {Project, StreamReport, Workspace, Ident, InstallMode}       from '@yarnpkg/core';
 import {structUtils}                                                from '@yarnpkg/core';
 import {PortablePath}                                               from '@yarnpkg/fslib';
-import {Command, Usage, UsageError}                                 from 'clipanion';
+import {Command, Option, Usage, UsageError}                         from 'clipanion';
 import {prompt}                                                     from 'enquirer';
+import * as t                                                       from 'typanion';
 
 import * as suggestUtils                                            from '../suggestUtils';
 import {Hooks}                                                      from '..';
 
 // eslint-disable-next-line arca/no-default-export
 export default class AddCommand extends BaseCommand {
-  @Command.Rest()
-  packages: Array<string> = [];
-
-  @Command.Boolean(`--json`, {description: `Format the output as an NDJSON stream`})
-  json: boolean = false;
-
-  @Command.Boolean(`-E,--exact`, {description: `Don't use any semver modifier on the resolved range`})
-  exact: boolean = false;
-
-  @Command.Boolean(`-T,--tilde`, {description: `Use the \`~\` semver modifier on the resolved range`})
-  tilde: boolean = false;
-
-  @Command.Boolean(`-C,--caret`, {description: `Use the \`^\` semver modifier on the resolved range`})
-  caret: boolean = false;
-
-  @Command.Boolean(`-D,--dev`, {description: `Add a package as a dev dependency`})
-  dev: boolean = false;
-
-  @Command.Boolean(`-P,--peer`, {description: `Add a package as a peer dependency`})
-  peer: boolean = false;
-
-  @Command.Boolean(`-O,--optional`, {description: `Add / upgrade a package to an optional regular / peer dependency`})
-  optional: boolean = false;
-
-  @Command.Boolean(`--prefer-dev`, {description: `Add / upgrade a package to a dev dependency`})
-  preferDev: boolean = false;
-
-  @Command.Boolean(`-i,--interactive`, {description: `Reuse the specified package from other workspaces in the project`})
-  interactive: boolean | null = null;
-
-  @Command.Boolean(`--cached`, {description: `Reuse the highest version already used somewhere within the project`})
-  cached: boolean = false;
+  static paths = [
+    [`add`],
+  ];
 
   static usage: Usage = Command.Usage({
     description: `add dependencies to the project`,
@@ -59,11 +31,17 @@ export default class AddCommand extends BaseCommand {
 
       - If the added package doesn't specify a range at all its \`latest\` tag will be resolved and the returned version will be used to generate a new semver range (using the \`^\` modifier by default unless otherwise configured via the \`defaultSemverRangePrefix\` configuration, or the \`~\` modifier if \`-T,--tilde\` is specified, or no modifier at all if \`-E,--exact\` is specified). Two exceptions to this rule: the first one is that if the package is a workspace then its local version will be used, and the second one is that if you use \`-P,--peer\` the default range will be \`*\` and won't be resolved at all.
 
-      - If the added package specifies a tag range (such as \`latest\` or \`rc\`), Yarn will resolve this tag to a semver version and use that in the resulting package.json entry (meaning that \`yarn add foo@latest\` will have exactly the same effect as \`yarn add foo\`).
+      - If the added package specifies a range (such as \`^1.0.0\`, \`latest\`, or \`rc\`), Yarn will add this range as-is in the resulting package.json entry (in particular, tags such as \`rc\` will be encoded as-is rather than being converted into a semver range).
 
       If the \`--cached\` option is used, Yarn will preferably reuse the highest version already used somewhere within the project, even if through a transitive dependency.
 
       If the \`-i,--interactive\` option is used (or if the \`preferInteractive\` settings is toggled on) the command will first try to check whether other workspaces in the project use the specified package and, if so, will offer to reuse them.
+
+      If the \`--mode=<mode>\` option is set, Yarn will change which artifacts are generated. The modes currently supported are:
+
+      - \`skip-build\` will not run the build scripts at all. Note that this is different from setting \`enableScripts\` to false because the later will disable build scripts, and thus affect the content of the artifacts generated on disk, whereas the former will just disable the build step - but not the scripts themselves, which just won't run.
+
+      - \`update-lockfile\` will skip the link step altogether, and only fetch packages that are missing from the lockfile (or that have no associated checksums). This mode is typically used by tools like Renovate or Dependabot to keep a lockfile up-to-date without incurring the full install cost.
 
       For a compilation of all the supported protocols, please consult the dedicated page from our website: https://yarnpkg.com/features/protocols.
     `,
@@ -88,7 +66,55 @@ export default class AddCommand extends BaseCommand {
     ]],
   });
 
-  @Command.Path(`add`)
+  json = Option.Boolean(`--json`, false, {
+    description: `Format the output as an NDJSON stream`,
+  });
+
+  exact = Option.Boolean(`-E,--exact`, false, {
+    description: `Don't use any semver modifier on the resolved range`,
+  });
+
+  tilde = Option.Boolean(`-T,--tilde`, false, {
+    description: `Use the \`~\` semver modifier on the resolved range`,
+  });
+
+  caret = Option.Boolean(`-C,--caret`, false, {
+    description: `Use the \`^\` semver modifier on the resolved range`,
+  });
+
+  dev = Option.Boolean(`-D,--dev`, false, {
+    description: `Add a package as a dev dependency`,
+  });
+
+  peer = Option.Boolean(`-P,--peer`, false, {
+    description: `Add a package as a peer dependency`,
+  });
+
+  optional = Option.Boolean(`-O,--optional`, false, {
+    description: `Add / upgrade a package to an optional regular / peer dependency`,
+  });
+
+  preferDev = Option.Boolean(`--prefer-dev`, false, {
+    description: `Add / upgrade a package to a dev dependency`,
+  });
+
+  interactive = Option.Boolean(`-i,--interactive`, {
+    description: `Reuse the specified package from other workspaces in the project`,
+  });
+
+  cached = Option.Boolean(`--cached`, false, {
+    description: `Reuse the highest version already used somewhere within the project`,
+  });
+
+  mode = Option.String(`--mode`, {
+    description: `Change what artifacts installs generate`,
+    validator: t.isEnum(InstallMode),
+  });
+
+  silent = Option.Boolean(`--silent`, {hidden: true});
+
+  packages = Option.Rest();
+
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
     const {project, workspace} = await Project.find(configuration, this.context.cwd);
@@ -96,6 +122,10 @@ export default class AddCommand extends BaseCommand {
 
     if (!workspace)
       throw new WorkspaceRequiredError(project.cwd, this.context.cwd);
+
+    await project.restoreInstallState({
+      restoreResolutions: false,
+    });
 
     const interactive = this.interactive ?? configuration.get(`preferInteractive`);
 
@@ -148,13 +178,13 @@ export default class AddCommand extends BaseCommand {
           if (typeof firstError === `undefined`)
             throw new Error(`Assertion failed: Expected an error to have been set`);
 
-          const prettyError = this.cli.error(firstError);
+          if (!project.configuration.get(`enableNetwork`))
+            report.reportError(MessageName.CANT_SUGGEST_RESOLUTIONS, `${structUtils.prettyDescriptor(configuration, request)} can't be resolved to a satisfying range (note: network resolution has been disabled)`);
+          else
+            report.reportError(MessageName.CANT_SUGGEST_RESOLUTIONS, `${structUtils.prettyDescriptor(configuration, request)} can't be resolved to a satisfying range`);
 
-          if (!project.configuration.get(`enableNetwork`)) {
-            report.reportError(MessageName.CANT_SUGGEST_RESOLUTIONS, `${structUtils.prettyDescriptor(configuration, request)} can't be resolved to a satisfying range (note: network resolution has been disabled):\n\n${prettyError}`);
-          } else {
-            report.reportError(MessageName.CANT_SUGGEST_RESOLUTIONS, `${structUtils.prettyDescriptor(configuration, request)} can't be resolved to a satisfying range:\n\n${prettyError}`);
-          }
+          report.reportSeparator();
+          report.reportExceptionOnce(firstError);
         }
       }
     });
@@ -168,14 +198,14 @@ export default class AddCommand extends BaseCommand {
       Workspace,
       suggestUtils.Target,
       Descriptor,
-      Array<suggestUtils.Strategy>
+      Array<suggestUtils.Strategy>,
     ]> = [];
 
     const afterWorkspaceDependencyReplacementList: Array<[
       Workspace,
       suggestUtils.Target,
       Descriptor,
-      Descriptor
+      Descriptor,
     ]> = [];
 
     for (const [/*request*/, {suggestions}, target] of allSuggestions) {
@@ -274,7 +304,7 @@ export default class AddCommand extends BaseCommand {
       stdout: this.context.stdout,
       includeLogs: !this.context.quiet,
     }, async report => {
-      await project.install({cache, report});
+      await project.install({cache, report, mode: this.mode});
     });
 
     return installReport.exitCode();

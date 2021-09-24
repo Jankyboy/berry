@@ -61,11 +61,17 @@ describe(`Configuration`, () => {
           unsetEnvWithFallback: {
             npmAuthToken: `\${NOT_EXISTING_ENV-fallback-value}`,
           },
+          unsetEnvWithEmptyFallback: {
+            npmAuthToken: `\${NOT_EXISTING_ENV-}`,
+          },
           emptyEnvWithStrictFallback: {
             npmAuthToken: `\${EMPTY_VARIABLE-fallback-value}`,
           },
           emptyEnvWithFallback: {
             npmAuthToken: `\${EMPTY_VARIABLE:-fallback-for-empty-value}`,
+          },
+          emptyEnvWithEmptyFallback: {
+            npmAuthToken: `\${EMPTY_VARIABLE:-}`,
           },
         },
       }, async dir => {
@@ -81,16 +87,20 @@ describe(`Configuration`, () => {
         const envInString = getToken(`envInString`);
         const envSetWithFallback = getToken(`envSetWithFallback`);
         const unsetEnvWithFallback = getToken(`unsetEnvWithFallback`);
+        const unsetEnvWithEmptyFallback = getToken(`unsetEnvWithEmptyFallback`);
         const emptyEnvWithStrictFallback = getToken(`emptyEnvWithStrictFallback`);
         const emptyEnvWithFallback = getToken(`emptyEnvWithFallback`);
+        const emptyEnvWithEmptyFallback = getToken(`emptyEnvWithEmptyFallback`);
 
         expect(onlyEnv).toEqual(`AAA-BBB-CCC`);
         expect(multipleEnvs).toEqual(`AAA-BBB-CCC-separator-AAA-BBB-CCC`);
         expect(envInString).toEqual(`beforeEnv-AAA-BBB-CCC-after-env`);
         expect(envSetWithFallback).toEqual(`AAA-BBB-CCC`);
         expect(unsetEnvWithFallback).toEqual(`fallback-value`);
+        expect(unsetEnvWithEmptyFallback).toEqual(``);
         expect(emptyEnvWithStrictFallback).toEqual(``);
         expect(emptyEnvWithFallback).toEqual(`fallback-for-empty-value`);
+        expect(emptyEnvWithEmptyFallback).toEqual(``);
       });
     });
 
@@ -106,6 +116,55 @@ describe(`Configuration`, () => {
           modules: new Map([[`@yarnpkg/plugin-npm`, NpmPlugin]]),
           plugins: new Set([`@yarnpkg/plugin-npm`]),
         })).rejects.toThrow();
+      });
+    });
+
+    it(`should handle boolean variables correctly`, async () => {
+      process.env.TRUE_VARIABLE = `true`;
+      process.env.FALSE_VARIABLE = `false`;
+
+      process.env.ONE_VARIABLE = `1`;
+      process.env.ZERO_VARIABLE = `0`;
+
+      await initializeConfiguration({
+        npmScopes: {
+          true: {
+            npmAlwaysAuth: `\${TRUE_VARIABLE}`,
+          },
+          false: {
+            npmAlwaysAuth: `\${FALSE_VARIABLE}`,
+          },
+
+          one: {
+            npmAlwaysAuth: `\${ONE_VARIABLE}`,
+          },
+          zero: {
+            npmAlwaysAuth: `\${ZERO_VARIABLE}`,
+          },
+
+          defaultTrue: {
+            npmAlwaysAuth: `\${NOT_EXISTING_ENV-true}`,
+          },
+          defaultFalse: {
+            npmAlwaysAuth: `\${NOT_EXISTING_ENV-false}`,
+          },
+        },
+      }, async dir => {
+        const configuration = await Configuration.find(dir, {
+          modules: new Map([[`@yarnpkg/plugin-npm`, NpmPlugin]]),
+          plugins: new Set([`@yarnpkg/plugin-npm`]),
+        });
+
+        const getAlwaysAuth = (scope: string) => configuration.get(`npmScopes`).get(scope)!.get(`npmAlwaysAuth`);
+
+        expect(getAlwaysAuth(`true`)).toEqual(true);
+        expect(getAlwaysAuth(`false`)).toEqual(false);
+
+        expect(getAlwaysAuth(`one`)).toEqual(true);
+        expect(getAlwaysAuth(`zero`)).toEqual(false);
+
+        expect(getAlwaysAuth(`defaultTrue`)).toEqual(true);
+        expect(getAlwaysAuth(`defaultFalse`)).toEqual(false);
       });
     });
   });
@@ -180,6 +239,87 @@ describe(`Configuration`, () => {
         expect(scopeConfiguration.get(`foo`)?.get(`npmAlwaysAuth`)).toBe(true);
 
         expect(scopeConfiguration.get(`bar`)?.get(`npmAlwaysAuth`)).toBe(true);
+      });
+    });
+
+    it(`should merge mergeable array properties`, async () => {
+      await initializeConfiguration({
+        logFilters: [{
+          code: `YN0005`,
+          level: `info`,
+        }],
+
+        unsafeHttpWhitelist: [
+          `example.com`,
+        ],
+      }, async dir => {
+        const configuration = await Configuration.find(dir, null);
+
+        configuration.useWithSource(`second file`, {
+          logFilters: [{
+            code: `YN0027`,
+            level: `error`,
+          }],
+
+          unsafeHttpWhitelist: [
+            `evil.com`,
+          ],
+        }, dir);
+
+        expect(configuration.get(`logFilters`)).toEqual([
+          new Map(Object.entries({
+            code: `YN0027`,
+            text: undefined,
+            pattern: undefined,
+            level: `error`,
+          })),
+          new Map(Object.entries({
+            code: `YN0005`,
+            text: undefined,
+            pattern: undefined,
+            level: `info`,
+          })),
+        ]);
+
+        expect(configuration.get(`unsafeHttpWhitelist`)).toEqual([
+          `example.com`,
+        ]);
+
+        configuration.useWithSource(`override file`, {
+          logFilters: [{
+            code: `YN0066`,
+            level: `warning`,
+          }],
+
+          unsafeHttpWhitelist: [
+            `yarnpkg.com`,
+          ],
+        }, dir, {overwrite: true});
+
+        expect(configuration.get(`logFilters`)).toEqual([
+          new Map(Object.entries({
+            code: `YN0027`,
+            text: undefined,
+            pattern: undefined,
+            level: `error`,
+          })),
+          new Map(Object.entries({
+            code: `YN0005`,
+            text: undefined,
+            pattern: undefined,
+            level: `info`,
+          })),
+          new Map(Object.entries({
+            code: `YN0066`,
+            text: undefined,
+            pattern: undefined,
+            level: `warning`,
+          })),
+        ]);
+
+        expect(configuration.get(`unsafeHttpWhitelist`)).toEqual([
+          `yarnpkg.com`,
+        ]);
       });
     });
   });

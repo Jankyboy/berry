@@ -10,14 +10,20 @@ const Container = styled.article`
   line-height: 1.7;
 `;
 
+const TitleContainer = styled.div`
+  border-bottom: 1px solid;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+
+  flex-wrap: wrap-reverse;
+`;
 const Title = styled.h1`
   box-sizing: border-box;
 
   margin: 0;
 
-  border-bottom: 1px solid;
-
-  font-weight: 300;
+  font-weight: 600;
   font-size: 2rem;
   line-height: 4rem;
 
@@ -26,17 +32,28 @@ const Title = styled.h1`
   }
 `;
 
+const EditLink = styled.a`
+  font-size: initial;
+  font-weight: initial;
+  line-height: initial;
+`;
+
 const Content = styled.div`
   blockquote {
     margin-left: 0;
+    margin-right: 0;
 
-    border-left: 3px solid #859daf;
+    border-left: 5px solid #859daf;
 
-    padding-left: .5em;
+    padding: 1em;
 
     font-style: italic;
 
-    color: #859daf;
+    background-color: #fff3e2;
+  }
+
+  blockquote > p {
+    margin: 0;
   }
 
   a:not(.anchor) {
@@ -120,7 +137,7 @@ const Content = styled.div`
   h2, h3, h4 {
     padding-bottom: 0.2em;
 
-    font-weight: 300;
+    font-weight: 600;
   }
 
   pre {
@@ -156,11 +173,14 @@ const Content = styled.div`
   }
 `;
 
-export const PrerenderedMarkdown = ({title, children}) => <>
+export const PrerenderedMarkdown = ({title, children, editUrl}) => <>
   <Container>
-    <Title>
-      {title.match(/^`.*`$/) ? <code>{title.slice(1, -1)}</code> : title}
-    </Title>
+    <TitleContainer>
+      <Title>
+        {title.match(/^`.*`$/) ? <code>{title.slice(1, -1)}</code> : title}
+      </Title>
+      {editUrl && <EditLink target="_blank" href={editUrl}>Edit this page on GitHub</EditLink>}
+    </TitleContainer>
     <Content dangerouslySetInnerHTML={{__html: children}} />
   </Container>
 </>;

@@ -9,11 +9,21 @@ const constraints = {
   [`gen_enforced_dependency (missing)`]: `gen_enforced_dependency(WorkspaceCwd, 'one-fixed-dep', '1.0.0', peerDependencies).`,
   [`gen_enforced_dependency (incompatible)`]: `gen_enforced_dependency(WorkspaceCwd, 'no-deps', '2.0.0', dependencies).`,
   [`gen_enforced_dependency (extraneous)`]: `gen_enforced_dependency(WorkspaceCwd, 'no-deps', null, _).`,
+  [`gen_enforced_dependency (extraneous2)`]:
+    `
+    gen_enforced_dependency(WorkspaceCwd, 'no-deps', null, _) :-
+      WorkspaceCwd \\= '.'.
+    gen_enforced_dependency(WorkspaceCwd, 'no-deps', '1.0.0', DependencyType) :-
+      workspace_has_dependency(WorkspaceCwd, 'no-deps', '1.0.0', DependencyType).
+    `,
   [`gen_enforced_dependency (ambiguous)`]: `gen_enforced_dependency(WorkspaceCwd, 'no-deps', '1.0.0', dependencies). gen_enforced_dependency(WorkspaceCwd, 'no-deps', '2.0.0', dependencies).`,
   [`gen_enforced_field (missing)`]: `gen_enforced_field(WorkspaceCwd, 'dependencies["a-new-dep"]', '1.0.0').`,
   [`gen_enforced_field (incompatible)`]: `gen_enforced_field(WorkspaceCwd, 'dependencies["no-deps"]', '2.0.0').`,
   [`gen_enforced_field (extraneous)`]: `gen_enforced_field(WorkspaceCwd, 'dependencies', null).`,
   [`gen_enforced_field (ambiguous)`]: `gen_enforced_field(WorkspaceCwd, 'dependencies["a-new-dep"]', '1.0.0'). gen_enforced_field(WorkspaceCwd, 'dependencies["a-new-dep"]', '2.0.0').`,
+  [`workspace_field w/ string FieldValue`]: `gen_enforced_field(WorkspaceCwd, '_name', FieldValue) :- workspace_field(WorkspaceCwd, 'name', FieldValue).`,
+  [`workspace_field w/ object FieldValue`]: `gen_enforced_field(WorkspaceCwd, '_repository', FieldValue) :- workspace_field(WorkspaceCwd, 'repository', FieldValue).`,
+  [`workspace_field w/ array FieldValue`]: `gen_enforced_field(WorkspaceCwd, '_files', FieldValue) :- workspace_field(WorkspaceCwd, 'files', FieldValue).`,
 };
 
 describe(`Commands`, () => {

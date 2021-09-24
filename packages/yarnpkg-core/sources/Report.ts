@@ -6,6 +6,7 @@ import {Locator}       from './types';
 
 export class ReportError extends Error {
   public reportCode: MessageName;
+  public originalError?: Error;
 
   constructor(code: MessageName, message: string, public reportExtra?: (report: Report) => void) {
     super(message);
@@ -23,6 +24,10 @@ export type ProgressDefinition = {
   title?: string,
 };
 
+export type TimerOptions = {
+  skipIfEmpty?: boolean;
+};
+
 export abstract class Report {
   private reportedInfos: Set<any> = new Set();
   private reportedWarnings: Set<any> = new Set();
@@ -31,7 +36,10 @@ export abstract class Report {
   abstract reportCacheHit(locator: Locator): void;
   abstract reportCacheMiss(locator: Locator, message?: string): void;
 
+  abstract startTimerPromise<T>(what: string, opts: TimerOptions, cb: () => Promise<T>): Promise<T>;
   abstract startTimerPromise<T>(what: string, cb: () => Promise<T>): Promise<T>;
+
+  abstract startTimerSync<T>(what: string, opts: TimerOptions, cb: () => T): T;
   abstract startTimerSync<T>(what: string, cb: () => T): T;
 
   abstract startCacheReport<T>(cb: () => Promise<T>): Promise<T>;
@@ -86,21 +94,25 @@ export abstract class Report {
     };
   }
 
-  reportInfoOnce(name: MessageName, text: string, opts?: {key?: any}) {
+  reportInfoOnce(name: MessageName, text: string, opts?: {key?: any, reportExtra?: (report: Report) => void}) {
     const key = opts && opts.key ? opts.key : text;
 
     if (!this.reportedInfos.has(key)) {
       this.reportedInfos.add(key);
       this.reportInfo(name, text);
+
+      opts?.reportExtra?.(this);
     }
   }
 
-  reportWarningOnce(name: MessageName, text: string, opts?: {key?: any}) {
+  reportWarningOnce(name: MessageName, text: string, opts?: {key?: any, reportExtra?: (report: Report) => void}) {
     const key = opts && opts.key ? opts.key : text;
 
     if (!this.reportedWarnings.has(key)) {
       this.reportedWarnings.add(key);
       this.reportWarning(name, text);
+
+      opts?.reportExtra?.(this);
     }
   }
 

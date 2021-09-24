@@ -1,7 +1,9 @@
 const path = require(`path`);
 
+/** @type {import('typedoc').TypeDocOptions} */
 module.exports = {
   name: `Yarn API`,
+  tsconfig: require.resolve(`@yarnpkg/monorepo/tsconfig.json`),
   inputFiles: [`../.`],
   mode: `modules`,
   out: `./static/api`,
@@ -42,9 +44,11 @@ module.exports = {
         "@yarnpkg/fslib": `yarnpkg_fslib`,
         "@yarnpkg/json-proxy": `yarnpkg_json_proxy`,
         "@yarnpkg/libzip": `yarnpkg_libzip`,
+        "@yarnpkg/nm": `yarnpkg_nm`,
         "@yarnpkg/parsers": `yarnpkg_parsers`,
         "@yarnpkg/pnp": `yarnpkg_pnp`,
         "@yarnpkg/pnpify": `yarnpkg_pnpify`,
+        "@yarnpkg/sdks": `yarnpkg_sdks`,
         "@yarnpkg/shell": `yarnpkg_shell`,
       },
       "Yarn Packages": {
@@ -61,7 +65,7 @@ module.exports = {
         "@yarnpkg/plugin-http": `plugin_http`,
         "@yarnpkg/plugin-init": `plugin_init`,
         "@yarnpkg/plugin-link": `plugin_link`,
-        "@yarnpkg/plugin-node-modules": `plugin_node_modules`,
+        "@yarnpkg/plugin-nm": `plugin_nm`,
         "@yarnpkg/plugin-npm": `plugin_npm`,
         "@yarnpkg/plugin-npm-cli": `plugin_npm_cli`,
         "@yarnpkg/plugin-pack": `plugin_pack`,

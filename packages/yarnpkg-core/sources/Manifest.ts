@@ -1,12 +1,13 @@
-import {FakeFS, Filename, NodeFS, PortablePath, npath, ppath} from '@yarnpkg/fslib';
-import {Resolution, parseResolution, stringifyResolution}     from '@yarnpkg/parsers';
-import semver                                                 from 'semver';
+import {FakeFS, Filename, NodeFS, PortablePath, ppath}    from '@yarnpkg/fslib';
+import {Resolution, parseResolution, stringifyResolution} from '@yarnpkg/parsers';
+import semver                                             from 'semver';
 
-import * as miscUtils                                         from './miscUtils';
-import * as semverUtils                                       from './semverUtils';
-import * as structUtils                                       from './structUtils';
-import {IdentHash}                                            from './types';
-import {Ident, Descriptor}                                    from './types';
+import {WorkspaceResolver}                                from './WorkspaceResolver';
+import * as miscUtils                                     from './miscUtils';
+import * as semverUtils                                   from './semverUtils';
+import * as structUtils                                   from './structUtils';
+import {Ident, Descriptor}                                from './types';
+import {IdentHash}                                        from './types';
 
 export type AllDependencies = 'dependencies' | 'devDependencies' | 'peerDependencies';
 export type HardDependencies = 'dependencies' | 'devDependencies';
@@ -49,6 +50,7 @@ export class Manifest {
 
   public type: string | null = null;
 
+  public packageManager: string | null = null;
   public ["private"]: boolean = false;
   public license: string | null = null;
 
@@ -122,6 +124,33 @@ export class Manifest {
     return manifest;
   }
 
+  static isManifestFieldCompatible(rules: Array<string> | null, actual: string) {
+    if (rules === null)
+      return true;
+
+    let isNotOnAllowlist = true;
+    let isOnDenylist = false;
+
+    for (const rule of rules) {
+      if (rule[0] === `!`) {
+        isOnDenylist = true;
+
+        if (actual === rule.slice(1)) {
+          return false;
+        }
+      } else {
+        isNotOnAllowlist = false;
+
+        if (rule === actual) {
+          return true;
+        }
+      }
+    }
+
+    // Denylists with allowlisted items should be treated as allowlists for `os` and `cpu` in `package.json`
+    return isOnDenylist && isNotOnAllowlist;
+  }
+
   loadFromText(text: string) {
     let data;
     try {
@@ -150,13 +179,14 @@ export class Manifest {
     this.indent = getIndent(content);
   }
 
-  load(data: any) {
+  load(data: any, {yamlCompatibilityMode = false}: {yamlCompatibilityMode?: boolean} = {}) {
     if (typeof data !== `object` || data === null)
       throw new Error(`Utterly invalid manifest data (${data})`);
 
     this.raw = data;
     const errors: Array<Error> = [];
 
+    this.name = null;
     if (typeof data.name === `string`) {
       try {
         this.name = structUtils.parseIdent(data.name);
@@ -167,6 +197,8 @@ export class Manifest {
 
     if (typeof data.version === `string`)
       this.version = data.version;
+    else
+      this.version = null;
 
     if (Array.isArray(data.os)) {
       const os: Array<string> = [];
@@ -179,6 +211,8 @@ export class Manifest {
           os.push(item);
         }
       }
+    } else {
+      this.os = null;
     }
 
     if (Array.isArray(data.cpu)) {
@@ -192,37 +226,65 @@ export class Manifest {
           cpu.push(item);
         }
       }
+    } else {
+      this.cpu = null;
     }
 
     if (typeof data.type === `string`)
       this.type = data.type;
+    else
+      this.type = null;
+
+    if (typeof data.packageManager === `string`)
+      this.packageManager = data.packageManager;
+    else
+      this.packageManager = null;
 
     if (typeof data.private === `boolean`)
       this.private = data.private;
+    else
+      this.private = false;
 
     if (typeof data.license === `string`)
       this.license = data.license;
+    else
+      this.license = null;
 
     if (typeof data.languageName === `string`)
       this.languageName = data.languageName;
+    else
+      this.languageName = null;
 
     if (typeof data.main === `string`)
-      this.main = data.main;
+      this.main = normalizeSlashes(data.main);
+    else
+      this.main = null;
 
     if (typeof data.module === `string`)
-      this.module = data.module;
+      this.module = normalizeSlashes(data.module);
+    else
+      this.module = null;
 
     if (data.browser != null) {
       if (typeof data.browser === `string`) {
-        this.browser = data.browser;
+        this.browser = normalizeSlashes(data.browser);
       } else {
-        this.browser = new Map(Object.entries(data.browser) as Iterable<[PortablePath, PortablePath | boolean]>);
+        this.browser = new Map();
+        for (const [key, value] of Object.entries(data.browser)) {
+          this.browser.set(
+            normalizeSlashes(key),
+            typeof value === `string` ? normalizeSlashes(value) : (value as boolean),
+          );
+        }
       }
+    } else {
+      this.browser = null;
     }
 
+    this.bin = new Map();
     if (typeof data.bin === `string`) {
       if (this.name !== null) {
-        this.bin = new Map([[this.name.name, data.bin]]);
+        this.bin.set(this.name.name, normalizeSlashes(data.bin));
       } else {
         errors.push(new Error(`String bin field, but no attached package name`));
       }
@@ -233,10 +295,11 @@ export class Manifest {
           continue;
         }
 
-        this.bin.set(key, value as PortablePath);
+        this.bin.set(key, normalizeSlashes(value));
       }
     }
 
+    this.scripts = new Map();
     if (typeof data.scripts === `object` && data.scripts !== null) {
       for (const [key, value] of Object.entries(data.scripts)) {
         if (typeof value !== `string`) {
@@ -248,6 +311,7 @@ export class Manifest {
       }
     }
 
+    this.dependencies = new Map();
     if (typeof data.dependencies === `object` && data.dependencies !== null) {
       for (const [name, range] of Object.entries(data.dependencies)) {
         if (typeof range !== `string`) {
@@ -268,6 +332,7 @@ export class Manifest {
       }
     }
 
+    this.devDependencies = new Map();
     if (typeof data.devDependencies === `object` && data.devDependencies !== null) {
       for (const [name, range] of Object.entries(data.devDependencies)) {
         if (typeof range !== `string`) {
@@ -288,6 +353,7 @@ export class Manifest {
       }
     }
 
+    this.peerDependencies = new Map();
     if (typeof data.peerDependencies === `object` && data.peerDependencies !== null) {
       for (let [name, range] of Object.entries(data.peerDependencies)) {
         let ident;
@@ -298,7 +364,7 @@ export class Manifest {
           continue;
         }
 
-        if (typeof range !== `string` || !semverUtils.validRange(range)) {
+        if (typeof range !== `string` || (!range.startsWith(WorkspaceResolver.protocol) && !semverUtils.validRange(range))) {
           errors.push(new Error(`Invalid dependency range for '${name}'`));
           range = `*`;
         }
@@ -317,6 +383,7 @@ export class Manifest {
         ? data.workspaces.packages
         : [];
 
+    this.workspaceDefinitions = [];
     for (const entry of workspaces) {
       if (typeof entry !== `string`) {
         errors.push(new Error(`Invalid workspace definition for '${entry}'`));
@@ -328,8 +395,9 @@ export class Manifest {
       });
     }
 
+    this.dependenciesMeta = new Map();
     if (typeof data.dependenciesMeta === `object` && data.dependenciesMeta !== null) {
-      for (const [pattern, meta] of Object.entries(data.dependenciesMeta)) {
+      for (const [pattern, meta] of Object.entries(data.dependenciesMeta) as Array<[string, any]>) {
         if (typeof meta !== `object` || meta === null) {
           errors.push(new Error(`Invalid meta field for '${pattern}`));
           continue;
@@ -338,24 +406,50 @@ export class Manifest {
         const descriptor = structUtils.parseDescriptor(pattern);
         const dependencyMeta = this.ensureDependencyMeta(descriptor);
 
-        Object.assign(dependencyMeta, meta);
+        const built = tryParseOptionalBoolean(meta.built, {yamlCompatibilityMode});
+        if (built === null) {
+          errors.push(new Error(`Invalid built meta field for '${pattern}'`));
+          continue;
+        }
+
+        const optional = tryParseOptionalBoolean(meta.optional, {yamlCompatibilityMode});
+        if (optional === null) {
+          errors.push(new Error(`Invalid optional meta field for '${pattern}'`));
+          continue;
+        }
+
+        const unplugged = tryParseOptionalBoolean(meta.unplugged, {yamlCompatibilityMode});
+        if (unplugged === null) {
+          errors.push(new Error(`Invalid unplugged meta field for '${pattern}'`));
+          continue;
+        }
+
+        Object.assign(dependencyMeta, {built, optional, unplugged});
       }
     }
 
+    this.peerDependenciesMeta = new Map();
     if (typeof data.peerDependenciesMeta === `object` && data.peerDependenciesMeta !== null) {
-      for (const [pattern, meta] of Object.entries(data.peerDependenciesMeta)) {
+      for (const [pattern, meta] of Object.entries(data.peerDependenciesMeta) as Array<[string, any]>) {
         if (typeof meta !== `object` || meta === null) {
-          errors.push(new Error(`Invalid meta field for '${pattern}`));
+          errors.push(new Error(`Invalid meta field for '${pattern}'`));
           continue;
         }
 
         const descriptor = structUtils.parseDescriptor(pattern);
         const peerDependencyMeta = this.ensurePeerDependencyMeta(descriptor);
 
-        Object.assign(peerDependencyMeta, meta);
+        const optional = tryParseOptionalBoolean(meta.optional, {yamlCompatibilityMode});
+        if (optional === null) {
+          errors.push(new Error(`Invalid optional meta field for '${pattern}'`));
+          continue;
+        }
+
+        Object.assign(peerDependencyMeta, {optional});
       }
     }
 
+    this.resolutions = [];
     if (typeof data.resolutions === `object` && data.resolutions !== null) {
       for (const [pattern, reference] of Object.entries(data.resolutions)) {
         if (typeof reference !== `string`) {
@@ -372,7 +466,7 @@ export class Manifest {
       }
     }
 
-    if (Array.isArray(data.files) && data.files.length !== 0) {
+    if (Array.isArray(data.files)) {
       this.files = new Set();
 
       for (const filename of data.files) {
@@ -383,6 +477,8 @@ export class Manifest {
 
         this.files.add(filename as PortablePath);
       }
+    } else {
+      this.files = null;
     }
 
     if (typeof data.publishConfig === `object` && data.publishConfig !== null) {
@@ -392,23 +488,31 @@ export class Manifest {
         this.publishConfig.access = data.publishConfig.access;
 
       if (typeof data.publishConfig.main === `string`)
-        this.publishConfig.main = data.publishConfig.main;
+        this.publishConfig.main = normalizeSlashes(data.publishConfig.main);
 
       if (typeof data.publishConfig.module === `string`)
-        this.publishConfig.module = data.publishConfig.module;
+        this.publishConfig.module = normalizeSlashes(data.publishConfig.module);
 
-      if (typeof data.publishConfig.browser === `string`)
-        this.publishConfig.browser = data.publishConfig.browser;
-
-      if (typeof data.publishConfig.browser === `object` && data.publishConfig.browser !== null)
-        this.publishConfig.browser = new Map(Object.entries(data.publishConfig.browser) as Iterable<[PortablePath, PortablePath | boolean]>);
+      if (data.publishConfig.browser != null) {
+        if (typeof data.publishConfig.browser === `string`) {
+          this.publishConfig.browser = normalizeSlashes(data.publishConfig.browser);
+        } else {
+          this.publishConfig.browser = new Map();
+          for (const [key, value] of Object.entries(data.publishConfig.browser)) {
+            this.publishConfig.browser.set(
+              normalizeSlashes(key),
+              typeof value === `string` ? normalizeSlashes(value) : (value as boolean),
+            );
+          }
+        }
+      }
 
       if (typeof data.publishConfig.registry === `string`)
         this.publishConfig.registry = data.publishConfig.registry;
 
       if (typeof data.publishConfig.bin === `string`) {
         if (this.name !== null) {
-          this.publishConfig.bin = new Map([[this.name.name, data.publishConfig.bin]]);
+          this.publishConfig.bin = new Map([[this.name.name, normalizeSlashes(data.publishConfig.bin)]]);
         } else {
           errors.push(new Error(`String bin field, but no attached package name`));
         }
@@ -421,7 +525,7 @@ export class Manifest {
             continue;
           }
 
-          this.publishConfig.bin.set(key, value as PortablePath);
+          this.publishConfig.bin.set(key, normalizeSlashes(value));
         }
       }
 
@@ -434,9 +538,11 @@ export class Manifest {
             continue;
           }
 
-          this.publishConfig.executableFiles.add(npath.toPortablePath(value));
+          this.publishConfig.executableFiles.add(normalizeSlashes(value));
         }
       }
+    } else {
+      this.publishConfig = null;
     }
 
     if (typeof data.installConfig === `object` && data.installConfig !== null) {
@@ -453,6 +559,8 @@ export class Manifest {
           errors.push(new Error(`Unrecognized installConfig key: ${key}`));
         }
       }
+    } else {
+      this.installConfig = null;
     }
 
     // We treat optional dependencies after both the regular dependency field
@@ -490,6 +598,8 @@ export class Manifest {
 
     if (typeof data.preferUnplugged === `boolean`)
       this.preferUnplugged = data.preferUnplugged;
+    else
+      this.preferUnplugged = null;
 
     this.errors = errors;
   }
@@ -549,11 +659,11 @@ export class Manifest {
   }
 
   isCompatibleWithOS(os: string): boolean {
-    return this.os === null || isManifestFieldCompatible(this.os, os);
+    return Manifest.isManifestFieldCompatible(this.os, os);
   }
 
   isCompatibleWithCPU(cpu: string): boolean {
-    return this.cpu === null || isManifestFieldCompatible(this.cpu, cpu);
+    return Manifest.isManifestFieldCompatible(this.cpu, cpu);
   }
 
   ensureDependencyMeta(descriptor: Descriptor) {
@@ -644,6 +754,11 @@ export class Manifest {
       data.type = this.type;
     else
       delete data.type;
+
+    if (this.packageManager !== null)
+      data.packageManager = this.packageManager;
+    else
+      delete data.packageManager;
 
     if (this.private)
       data.private = true;
@@ -811,6 +926,21 @@ export class Manifest {
     else
       delete data.preferUnplugged;
 
+    if (this.scripts !== null && this.scripts.size > 0) {
+      data.scripts ??= {};
+
+      for (const existingScriptName of Object.keys(data.scripts))
+        if (!this.scripts.has(existingScriptName))
+          delete data.scripts[existingScriptName];
+
+      for (const [name, content] of this.scripts.entries()) {
+        // Set one at a time in order to preserve implicitly-preserved ordering of existing scripts.
+        data.scripts[name] = content;
+      }
+    } else {
+      delete data.scripts;
+    }
+
     return data;
   }
 }
@@ -833,26 +963,16 @@ function stripBOM(content: string) {
   }
 }
 
-function isManifestFieldCompatible(rules: Array<string>, actual: string) {
-  let isNotWhitelist = true;
-  let isBlacklist = false;
+function normalizeSlashes(str: string) {
+  return str.replace(/\\/g, `/`) as PortablePath;
+}
 
-  for (const rule of rules) {
-    if (rule[0] === `!`) {
-      isBlacklist = true;
+function tryParseOptionalBoolean(value: unknown, {yamlCompatibilityMode}: {yamlCompatibilityMode: boolean}) {
+  if (yamlCompatibilityMode)
+    return miscUtils.tryParseOptionalBoolean(value);
 
-      if (actual === rule.slice(1)) {
-        return false;
-      }
-    } else {
-      isNotWhitelist = false;
+  if (typeof value === `undefined` || typeof value === `boolean`)
+    return value;
 
-      if (rule === actual) {
-        return true;
-      }
-    }
-  }
-
-  // Blacklists with whitelisted items should be treated as whitelists for `os` and `cpu` in `package.json`
-  return isBlacklist && isNotWhitelist;
+  return null;
 }

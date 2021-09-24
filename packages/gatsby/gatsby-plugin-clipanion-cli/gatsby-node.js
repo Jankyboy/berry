@@ -11,7 +11,7 @@ exports.sourceNodes = ({actions, createNodeId, createContentDigest}, opts) => {
 
     let commands;
     try {
-      ({commands} = JSON.parse(output));
+      commands = JSON.parse(output);
     } catch (error) {
       throw new Error(`Failed to parse "${output}"`);
     }
@@ -20,13 +20,16 @@ exports.sourceNodes = ({actions, createNodeId, createContentDigest}, opts) => {
       const command = commands[t];
       const sections = [];
 
-      const url = command.path.split(` `).slice(1).join(`/`);
+      const url = command.path.split(` `).slice(1).join(`/`) || `default`;
+
+      const description = `${command.description[0].toUpperCase()}${command.description.slice(1, -1)}.`;
 
       sections.push([
         `---\n`,
         `category: ${namespaceTrailingSlash}cli\n`,
         `path: ${namespaceLeadingSlash}/cli/${url}\n`,
         `title: "\`${command.path}\`"\n`,
+        `description: ${JSON.stringify(description)}\n`,
         `---\n`,
       ].join(``));
 
@@ -42,7 +45,7 @@ exports.sourceNodes = ({actions, createNodeId, createContentDigest}, opts) => {
 
       if (command.description) {
         sections.push([
-          `${command.description[0].toUpperCase()}${command.description.slice(1, -1)}.\n`,
+          `${description}\n`,
         ].join(``));
       }
 
@@ -68,13 +71,14 @@ exports.sourceNodes = ({actions, createNodeId, createContentDigest}, opts) => {
       }
 
       if (command.options.length > 0) {
+        const addAnchor = definition => `<h3 id="${encodeURIComponent((`options-${definition}`).replace(/-+/g, `-`))}" class="header-code"><code class="language-text">${definition}</code></h3>`;
         sections.push([
           `## Options\n`,
           `\n`,
           `| <div style="width:180px">Definition</div> | Description |\n`,
           `| ---------- | ----------- |\n`,
           ...command.options.map(
-            ({definition, description}) => `| \`${definition}\` | ${description} |\n`
+            ({definition, description}) => `| ${addAnchor(definition)} | ${description} |\n`,
           ),
         ].join(``));
       }

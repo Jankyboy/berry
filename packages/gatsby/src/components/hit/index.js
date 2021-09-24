@@ -130,7 +130,7 @@ const HitPopular = styled.span`
 export const Downloads = ({downloads = 0, humanDownloads}) => (
   <HitPopular
     className={`${getDownloadBucket(downloads)}`}
-    title={`${downloads.toLocaleString('en')} downloads in the last 30 days`}
+    title={`${downloads.toLocaleString(`en`)} downloads in the last 30 days`}
   >
     {humanDownloads}
   </HitPopular>
@@ -178,15 +178,15 @@ const HitRepoLink = styled(HitLink)`
 `;
 
 const Repository = ({repository, name}) => {
-  const [provider] = repository.host.split('.');
+  const [provider] = repository.host.split(`.`);
 
   return (
     <HitRepoLink
       provider={provider}
       title={`${provider} repository of ${name}`}
       href={`https://${repository.host}/${encode(repository.user)}/${encode(
-        repository.project
-      )}${repository.path || ''}`}
+        repository.project,
+      )}${repository.path || ``}`}
     >
       {provider}
     </HitRepoLink>
@@ -254,14 +254,31 @@ const IconTypeScript = styled.img`
   vertical-align: baseline;
 `;
 
-export const TypeScript = ({ts}) =>
-  ts !== false ? (
-    <IconTypeScript
-      src={IcoTypeScript}
-      alt={`TypeScript support: ${ts}`}
-      title={`TypeScript support: ${ts}`}
-    />
-  ) : null;
+export const TypeScript = ({name, ts}) => {
+  if (ts === false)
+    return null;
+
+  const iconTypescript = <IconTypeScript
+    src={IcoTypeScript}
+    alt={`TypeScript support: ${ts}`}
+    title={`TypeScript support: ${ts}`}
+  />;
+
+  if (ts !== `definitely-typed`)
+    return iconTypescript;
+
+  const [, identScope, indentName] = /^(?:@([^/]+?)\/)?([^/]+)$/.exec(name);
+
+  const typesIdentName = identScope
+    ? `${identScope}__${indentName}`
+    : indentName;
+
+  return (
+    <a href={`/package/@types/${typesIdentName}`}>
+      {iconTypescript}
+    </a>
+  );
+};
 
 const HitDescription = styled.p`
   font-size: 0.875rem;
@@ -296,7 +313,7 @@ export const Hit = ({hit, onTagClick, onOwnerClick, searchState}) => (
     <License type={hit.license} />
     <Deprecated deprecated={hit.deprecated} />
     <HitVersion>{hit.version}</HitVersion>
-    <TypeScript ts={hit.types.ts} />
+    <TypeScript name={hit.name} ts={hit.types.ts} />
     <HitDescription>
       {hit.deprecated ? (
         hit.deprecated
@@ -306,11 +323,11 @@ export const Hit = ({hit, onTagClick, onOwnerClick, searchState}) => (
     </HitDescription>
     <Owner {...hit.owner} onClick={onOwnerClick} />
     <HitLastUpdate
-      title={`last updated ${new Date(hit.modified).toLocaleDateString('en')}`}
+      title={`last updated ${new Date(hit.modified).toLocaleDateString(`en`)}`}
     >
-      {'{time_distance} ago'.replace(
-        '{time_distance}',
-        formatDistance(new Date(hit.modified), new Date())
+      {`{time_distance} ago`.replace(
+        `{time_distance}`,
+        formatDistance(new Date(hit.modified), new Date()),
       )}
     </HitLastUpdate>
     {isEmpty(hit.keywords) ? null : (
@@ -319,7 +336,7 @@ export const Hit = ({hit, onTagClick, onOwnerClick, searchState}) => (
           hit.keywords,
           hit._highlightResult.keywords,
           4,
-          onTagClick
+          onTagClick,
         )}
       </HitHiddenKeywords>
     )}

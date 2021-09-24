@@ -1,11 +1,12 @@
-import sliceAnsi                    from '@arcanis/slice-ansi';
-import {Writable}                   from 'stream';
+import sliceAnsi                                  from '@arcanis/slice-ansi';
+import {Writable}                                 from 'stream';
 
-import {Configuration}              from './Configuration';
-import {MessageName}                from './MessageName';
-import {ProgressDefinition, Report} from './Report';
-import * as formatUtils             from './formatUtils';
-import {Locator}                    from './types';
+import {Configuration}                            from './Configuration';
+import {MessageName, stringifyMessageName}        from './MessageName';
+import {ProgressDefinition, Report, TimerOptions} from './Report';
+import * as formatUtils                           from './formatUtils';
+import * as structUtils                           from './structUtils';
+import {Locator}                                  from './types';
 
 export type StreamReportOptions = {
   configuration: Configuration,
@@ -30,7 +31,7 @@ const GROUP = process.env.GITHUB_ACTIONS
   : process.env.TRAVIS
     ? {start: (what: string) => `travis_fold:start:${what}\n`, end: (what: string) => `travis_fold:end:${what}\n`}
     : process.env.GITLAB_CI
-      ? {start: (what: string) => `section_start:${Math.floor(Date.now() / 1000)}:${what.toLowerCase().replace(/\W+/g, `_`)}\r\x1b[0K${what}\n`, end: (what: string) => `section_end:${Math.floor(Date.now() / 1000)}:${what.toLowerCase().replace(/\W+/g, `_`)}\r\x1b[0K`}
+      ? {start: (what: string) => `section_start:${Math.floor(Date.now() / 1000)}:${what.toLowerCase().replace(/\W+/g, `_`)}[collapsed=true]\r\x1b[0K${what}\n`, end: (what: string) => `section_end:${Math.floor(Date.now() / 1000)}:${what.toLowerCase().replace(/\W+/g, `_`)}\r\x1b[0K`}
       : null;
 
 const now = new Date();
@@ -78,8 +79,11 @@ const defaultStyle = (supportsEmojis && Object.keys(PROGRESS_STYLES).find(name =
 })) || `default`;
 
 export function formatName(name: MessageName | null, {configuration, json}: {configuration: Configuration, json: boolean}) {
+  if (!configuration.get(`enableMessageNames`))
+    return ``;
+
   const num = name === null ? 0 : name;
-  const label = `YN${num.toString(10).padStart(4, `0`)}`;
+  const label = stringifyMessageName(num);
 
   if (!json && name === null) {
     return formatUtils.pretty(configuration, label, `grey`);
@@ -90,9 +94,7 @@ export function formatName(name: MessageName | null, {configuration, json}: {con
 
 export function formatNameWithHyperlink(name: MessageName | null, {configuration, json}: {configuration: Configuration, json: boolean}) {
   const code = formatName(name, {configuration, json});
-
-  // Only print hyperlinks if allowed per configuration
-  if (!configuration.get(`enableHyperlinks`))
+  if (!code)
     return code;
 
   // Don't print hyperlinks for the generic messages
@@ -102,11 +104,7 @@ export function formatNameWithHyperlink(name: MessageName | null, {configuration
   const desc = MessageName[name];
   const href = `https://yarnpkg.com/advanced/error-codes#${code}---${desc}`.toLowerCase();
 
-  // We use BELL as ST because it seems that iTerm doesn't properly support
-  // the \x1b\\ sequence described in the reference document
-  // https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda#the-escape-sequence
-
-  return `\u001b]8;;${href}\u0007${code}\u001b]8;;\u0007`;
+  return formatUtils.applyHyperlink(configuration, code, href);
 }
 
 export class StreamReport extends Report {
@@ -148,8 +146,14 @@ export class StreamReport extends Report {
   private json: boolean;
   private stdout: Writable;
 
+  private uncommitted = new Set<{
+    committed: boolean,
+    action: () => void,
+  }>();
+
   private cacheHitCount: number = 0;
   private cacheMissCount: number = 0;
+  private lastCacheMiss: Locator | null = null;
 
   private warningCount: number = 0;
   private errorCount: number = 0;
@@ -158,10 +162,16 @@ export class StreamReport extends Report {
 
   private indent: number = 0;
 
-  private progress: Map<AsyncIterable<ProgressDefinition>, ProgressDefinition> = new Map();
+  private progress: Map<AsyncIterable<ProgressDefinition>, {
+    definition: ProgressDefinition,
+    lastScaledSize: number,
+  }> = new Map();
+
   private progressTime: number = 0;
   private progressFrame: number = 0;
   private progressTimeout: ReturnType<typeof setTimeout> | null = null;
+  private progressStyle: {date?: Array<number>, chars: Array<string>, size: number};
+  private progressMaxScaledSize: number;
 
   private forgettableBufferSize: number;
   private forgettableNames: Set<MessageName | null>;
@@ -180,17 +190,26 @@ export class StreamReport extends Report {
   }: StreamReportOptions) {
     super();
 
+    formatUtils.addLogFilterSupport(this, {configuration});
+
     this.configuration = configuration;
     this.forgettableBufferSize = forgettableBufferSize;
-    this.forgettableNames = new Set([
-      ...forgettableNames,
-      ...BASE_FORGETTABLE_NAMES,
-    ]);
+    this.forgettableNames = new Set([...forgettableNames, ...BASE_FORGETTABLE_NAMES]);
     this.includeFooter = includeFooter;
     this.includeInfos = includeInfos;
     this.includeWarnings = includeWarnings;
     this.json = json;
     this.stdout = stdout;
+
+    const styleName = this.configuration.get(`progressBarStyle`) || defaultStyle;
+    if (!Object.prototype.hasOwnProperty.call(PROGRESS_STYLES, styleName))
+      throw new Error(`Assertion failed: Invalid progress bar style`);
+
+    this.progressStyle = PROGRESS_STYLES[styleName];
+    const PAD_LEFT = `➤ YN0000: ┌ `.length;
+
+    const maxWidth = Math.max(0, Math.min(process.stdout.columns - PAD_LEFT, 80));
+    this.progressMaxScaledSize = Math.floor(this.progressStyle.size * maxWidth / 80);
   }
 
   hasErrors() {
@@ -206,6 +225,7 @@ export class StreamReport extends Report {
   }
 
   reportCacheMiss(locator: Locator, message?: string) {
+    this.lastCacheMiss = locator;
     this.cacheMissCount += 1;
 
     if (typeof message !== `undefined` && !this.configuration.get(`preferAggregateCacheInfo`)) {
@@ -213,54 +233,98 @@ export class StreamReport extends Report {
     }
   }
 
-  startTimerSync<T>(what: string, cb: () => T) {
-    this.reportInfo(null, `┌ ${what}`);
+  startTimerSync<T>(what: string, opts: TimerOptions, cb: () => T): T;
+  startTimerSync<T>(what: string, cb: () => T): T;
+  startTimerSync<T>(what: string, opts: TimerOptions | (() => T), cb?: () => T) {
+    const realOpts = typeof opts === `function` ? {} : opts;
+    const realCb = typeof opts === `function` ? opts : cb!;
+
+    const mark = {committed: false, action: () => {
+      this.reportInfo(null, `┌ ${what}`);
+      this.indent += 1;
+
+      if (GROUP !== null && !this.json && this.includeInfos) {
+        this.stdout.write(GROUP.start(what));
+      }
+    }};
+
+    if (realOpts.skipIfEmpty) {
+      this.uncommitted.add(mark);
+    } else {
+      mark.action();
+      mark.committed = true;
+    }
 
     const before = Date.now();
-    this.indent += 1;
 
     try {
-      return cb();
+      return realCb();
     } catch (error) {
       this.reportExceptionOnce(error);
       throw error;
     } finally {
       const after = Date.now();
-      this.indent -= 1;
 
-      if (this.configuration.get(`enableTimers`) && after - before > 200) {
-        this.reportInfo(null, `└ Completed in ${formatUtils.pretty(this.configuration, after - before, formatUtils.Type.DURATION)}`);
-      } else {
-        this.reportInfo(null, `└ Completed`);
+      this.uncommitted.delete(mark);
+      if (mark.committed) {
+        this.indent -= 1;
+
+        if (GROUP !== null && !this.json && this.includeInfos)
+          this.stdout.write(GROUP.end(what));
+
+        if (this.configuration.get(`enableTimers`) && after - before > 200) {
+          this.reportInfo(null, `└ Completed in ${formatUtils.pretty(this.configuration, after - before, formatUtils.Type.DURATION)}`);
+        } else {
+          this.reportInfo(null, `└ Completed`);
+        }
       }
     }
   }
 
-  async startTimerPromise<T>(what: string, cb: () => Promise<T>) {
-    this.reportInfo(null, `┌ ${what}`);
+  async startTimerPromise<T>(what: string, opts: TimerOptions, cb: () => Promise<T>): Promise<T>;
+  async startTimerPromise<T>(what: string, cb: () => Promise<T>): Promise<T>;
+  async startTimerPromise<T>(what: string, opts: TimerOptions | (() => Promise<T>), cb?: () => Promise<T>) {
+    const realOpts = typeof opts === `function` ? {} : opts;
+    const realCb = typeof opts === `function` ? opts : cb!;
 
-    if (GROUP !== null)
-      this.stdout.write(GROUP.start(what));
+    const mark = {committed: false, action: () => {
+      this.reportInfo(null, `┌ ${what}`);
+      this.indent += 1;
+
+      if (GROUP !== null && !this.json && this.includeInfos) {
+        this.stdout.write(GROUP.start(what));
+      }
+    }};
+
+    if (realOpts.skipIfEmpty) {
+      this.uncommitted.add(mark);
+    } else {
+      mark.action();
+      mark.committed = true;
+    }
 
     const before = Date.now();
-    this.indent += 1;
 
     try {
-      return await cb();
+      return await realCb();
     } catch (error) {
       this.reportExceptionOnce(error);
       throw error;
     } finally {
       const after = Date.now();
-      this.indent -= 1;
 
-      if (GROUP !== null)
-        this.stdout.write(GROUP.end(what));
+      this.uncommitted.delete(mark);
+      if (mark.committed) {
+        this.indent -= 1;
 
-      if (this.configuration.get(`enableTimers`) && after - before > 200) {
-        this.reportInfo(null, `└ Completed in ${formatUtils.pretty(this.configuration, after - before, formatUtils.Type.DURATION)}`);
-      } else {
-        this.reportInfo(null, `└ Completed`);
+        if (GROUP !== null && !this.json && this.includeInfos)
+          this.stdout.write(GROUP.end(what));
+
+        if (this.configuration.get(`enableTimers`) && after - before > 200) {
+          this.reportInfo(null, `└ Completed in ${formatUtils.pretty(this.configuration, after - before, formatUtils.Type.DURATION)}`);
+        } else {
+          this.reportInfo(null, `└ Completed`);
+        }
       }
     }
   }
@@ -294,7 +358,12 @@ export class StreamReport extends Report {
     if (!this.includeInfos)
       return;
 
-    const message = `${formatUtils.pretty(this.configuration, `➤`, `blueBright`)} ${this.formatNameWithHyperlink(name)}: ${this.formatIndent()}${text}`;
+    this.commit();
+
+    const formattedName = this.formatNameWithHyperlink(name);
+    const prefix = formattedName ? `${formattedName}: ` : ``;
+
+    const message = `${formatUtils.pretty(this.configuration, `➤`, `blueBright`)} ${prefix}${this.formatIndent()}${text}`;
 
     if (!this.json) {
       if (this.forgettableNames.has(name)) {
@@ -321,8 +390,13 @@ export class StreamReport extends Report {
     if (!this.includeWarnings)
       return;
 
+    this.commit();
+
+    const formattedName = this.formatNameWithHyperlink(name);
+    const prefix = formattedName ? `${formattedName}: ` : ``;
+
     if (!this.json) {
-      this.writeLineWithForgettableReset(`${formatUtils.pretty(this.configuration, `➤`, `yellowBright`)} ${this.formatNameWithHyperlink(name)}: ${this.formatIndent()}${text}`);
+      this.writeLineWithForgettableReset(`${formatUtils.pretty(this.configuration, `➤`, `yellowBright`)} ${prefix}${this.formatIndent()}${text}`);
     } else {
       this.reportJson({type: `warning`, name, displayName: this.formatName(name), indent: this.formatIndent(), data: text});
     }
@@ -331,8 +405,13 @@ export class StreamReport extends Report {
   reportError(name: MessageName, text: string) {
     this.errorCount += 1;
 
+    this.commit();
+
+    const formattedName = this.formatNameWithHyperlink(name);
+    const prefix = formattedName ? `${formattedName}: ` : ``;
+
     if (!this.json) {
-      this.writeLineWithForgettableReset(`${formatUtils.pretty(this.configuration, `➤`, `redBright`)} ${this.formatNameWithHyperlink(name)}: ${this.formatIndent()}${text}`, {truncate: false});
+      this.writeLineWithForgettableReset(`${formatUtils.pretty(this.configuration, `➤`, `redBright`)} ${prefix}${this.formatIndent()}${text}`, {truncate: false});
     } else {
       this.reportJson({type: `error`, name, displayName: this.formatName(name), indent: this.formatIndent(), data: text});
     }
@@ -347,7 +426,11 @@ export class StreamReport extends Report {
         title: undefined,
       };
 
-      this.progress.set(progressIt, progressDefinition);
+      this.progress.set(progressIt, {
+        definition: progressDefinition,
+        lastScaledSize: -1,
+      });
+
       this.refreshProgress(-1);
 
       for await (const {progress, title} of progressIt) {
@@ -450,17 +533,27 @@ export class StreamReport extends Report {
       if (this.cacheMissCount > 1) {
         fetchStatus += `, ${this.cacheMissCount} had to be fetched`;
       } else if (this.cacheMissCount === 1) {
-        fetchStatus += `, one had to be fetched`;
+        fetchStatus += `, one had to be fetched (${structUtils.prettyLocator(this.configuration, this.lastCacheMiss!)})`;
       }
     } else {
       if (this.cacheMissCount > 1) {
         fetchStatus += ` - ${this.cacheMissCount} packages had to be fetched`;
       } else if (this.cacheMissCount === 1) {
-        fetchStatus += ` - one package had to be fetched`;
+        fetchStatus += ` - one package had to be fetched (${structUtils.prettyLocator(this.configuration, this.lastCacheMiss!)})`;
       }
     }
 
     this.reportInfo(MessageName.FETCH_NOT_CACHED, fetchStatus);
+  }
+
+  private commit() {
+    const marks = this.uncommitted;
+    this.uncommitted = new Set();
+
+    for (const mark of marks) {
+      mark.committed = true;
+      mark.action();
+    }
   }
 
   private clearProgress({delta = 0, clear = false}: {delta?: number, clear?: boolean}) {
@@ -496,34 +589,44 @@ export class StreamReport extends Report {
 
     const spinner = PROGRESS_FRAMES[this.progressFrame];
 
-    const styleName = this.configuration.get(`progressBarStyle`) || defaultStyle;
-    if (!Object.prototype.hasOwnProperty.call(PROGRESS_STYLES, styleName))
-      throw new Error(`Assertion failed: Invalid progress bar style`);
+    for (const progress of this.progress.values()) {
+      const ok = this.progressStyle.chars[0].repeat(progress.lastScaledSize);
+      const ko = this.progressStyle.chars[1].repeat(this.progressMaxScaledSize - progress.lastScaledSize);
 
-    const style = PROGRESS_STYLES[styleName];
+      const formattedName = this.formatName(null);
+      const prefix = formattedName ? `${formattedName}: ` : ``;
 
-    const PAD_LEFT = `➤ YN0000: ┌ `.length;
-
-    const maxWidth = Math.max(0, Math.min(process.stdout.columns - PAD_LEFT, 80));
-    const scaledSize = Math.floor(style.size * maxWidth / 80);
-
-    for (const {progress} of this.progress.values()) {
-      const okSize = scaledSize * progress;
-
-      const ok = style.chars[0].repeat(okSize);
-      const ko = style.chars[1].repeat(scaledSize - okSize);
-
-      this.stdout.write(`${formatUtils.pretty(this.configuration, `➤`, `blueBright`)} ${this.formatName(null)}: ${spinner} ${ok}${ko}\n`);
+      this.stdout.write(`${formatUtils.pretty(this.configuration, `➤`, `blueBright`)} ${prefix}${spinner} ${ok}${ko}\n`);
     }
 
     this.progressTimeout = setTimeout(() => {
       this.refreshProgress();
-    }, 1000 / 60);
+    }, PROGRESS_INTERVAL);
   }
 
   private refreshProgress(delta: number = 0) {
-    this.clearProgress({delta});
-    this.writeProgress();
+    let needsUpdate = false;
+
+    if (this.progress.size === 0) {
+      needsUpdate = true;
+    } else {
+      for (const progress of this.progress.values()) {
+        const refreshedScaledSize = Math.trunc(this.progressMaxScaledSize * progress.definition.progress);
+
+        const previousScaledSize = progress.lastScaledSize;
+        progress.lastScaledSize = refreshedScaledSize;
+
+        if (refreshedScaledSize !== previousScaledSize) {
+          needsUpdate = true;
+          break;
+        }
+      }
+    }
+
+    if (needsUpdate) {
+      this.clearProgress({delta});
+      this.writeProgress();
+    }
   }
 
   private truncate(str: string, {truncate}: {truncate?: boolean} = {}) {

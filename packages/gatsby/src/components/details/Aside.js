@@ -2,7 +2,6 @@ import styled                                   from '@emotion/styled';
 import React                                    from 'react';
 
 import {ifDesktop}                              from '../responsive';
-
 import {packageJSONLink, isKnownRepositoryHost} from '../util';
 
 import {Activity}                               from './Activity';
@@ -67,7 +66,7 @@ export const Aside = ({
     />
     {repository &&
       isKnownRepositoryHost(repository.host) &&
-      (repository.host === 'github.com' ? (
+      (repository.host === `github.com` ? (
         <GithubActivity data={activity} repository={repository} />
       ) : (
         <Activity {...activity} repository={repository} />

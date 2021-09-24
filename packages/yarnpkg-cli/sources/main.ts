@@ -1,12 +1,11 @@
 import {Configuration, CommandContext, PluginConfiguration, TelemetryManager, semverUtils} from '@yarnpkg/core';
 import {PortablePath, npath, xfs}                                                          from '@yarnpkg/fslib';
 import {execFileSync}                                                                      from 'child_process';
+import {isCI}                                                                              from 'ci-info';
 import {Cli, UsageError}                                                                   from 'clipanion';
-
 import {realpathSync}                                                                      from 'fs';
 
 import {pluginCommands}                                                                    from './pluginCommands';
-import {WelcomeCommand}                                                                    from './tools/WelcomeCommand';
 
 function runBinary(path: PortablePath) {
   const physicalPath = npath.fromPortablePath(path);
@@ -45,8 +44,6 @@ export async function main({binaryVersion, pluginConfiguration}: {binaryVersion:
       binaryVersion,
     });
 
-    cli.register(WelcomeCommand);
-
     try {
       await exec(cli);
     } catch (error) {
@@ -57,13 +54,13 @@ export async function main({binaryVersion, pluginConfiguration}: {binaryVersion:
 
   async function exec(cli: Cli<CommandContext>): Promise<void> {
     // Non-exhaustive known requirements:
-    // - 10.16+ for Brotli support on `plugin-compat`
-    // - 10.17+ to silence `got` warning on `dns.promises`
+    // - 14.0 and 14.1 empty http responses - https://github.com/sindresorhus/got/issues/1496
+    // - 14.10.0 broken streams - https://github.com/nodejs/node/pull/34035 (fix: https://github.com/nodejs/node/commit/0f94c6b4e4)
 
     const version = process.versions.node;
-    const range = `>=10.17`;
+    const range = `>=12 <14 || 14.2 - 14.9 || >14.10.0`;
 
-    if (!semverUtils.satisfiesWithPrereleases(version, range) && process.env.YARN_IGNORE_NODE !== `1`)
+    if (process.env.YARN_IGNORE_NODE !== `1` && !semverUtils.satisfiesWithPrereleases(version, range))
       throw new UsageError(`This tool requires a Node version compatible with ${range} (got ${version}). Upgrade Node, or set \`YARN_IGNORE_NODE=1\` in your environment.`);
 
     // Since we only care about a few very specific settings (yarn-path and ignore-path) we tolerate extra configuration key.
@@ -77,8 +74,21 @@ export async function main({binaryVersion, pluginConfiguration}: {binaryVersion:
     const ignorePath = configuration.get(`ignorePath`);
     const ignoreCwd = configuration.get(`ignoreCwd`);
 
+    const selfPath = npath.toPortablePath(npath.resolve(process.argv[1]));
+
+    const tryRead = (p: PortablePath) => xfs.readFilePromise(p).catch(() => {
+      return Buffer.of();
+    });
+
+    const isSameBinary = async () =>
+      yarnPath === selfPath ||
+      Buffer.compare(...await Promise.all([
+        tryRead(yarnPath),
+        tryRead(selfPath),
+      ])) === 0;
+
     // Avoid unnecessary spawn when run directly
-    if (!ignorePath && !ignoreCwd && yarnPath === npath.toPortablePath(npath.resolve(process.argv[1]))) {
+    if (!ignorePath && !ignoreCwd && await isSameBinary()) {
       process.env.YARN_IGNORE_PATH = `1`;
       process.env.YARN_IGNORE_CWD = `1`;
 
@@ -100,7 +110,7 @@ export async function main({binaryVersion, pluginConfiguration}: {binaryVersion:
         delete process.env.YARN_IGNORE_PATH;
 
       const isTelemetryEnabled = configuration.get(`enableTelemetry`);
-      if (isTelemetryEnabled)
+      if (isTelemetryEnabled && !isCI && process.stdout.isTTY)
         Configuration.telemetry = new TelemetryManager(configuration, `puba9cdc10ec5790a2cf4969dd413a47270`);
 
       Configuration.telemetry?.reportVersion(binaryVersion);
