@@ -1,13 +1,12 @@
 import {BaseCommand}            from '@yarnpkg/cli';
 import {Configuration, Project} from '@yarnpkg/core';
-import {Command, Usage}         from 'clipanion';
-
-import {Constraints}            from '../../Constraints';
+import {Command, Option, Usage} from 'clipanion';
 
 // eslint-disable-next-line arca/no-default-export
 export default class ConstraintsSourceCommand extends BaseCommand {
-  @Command.Boolean(`-v,--verbose`, {description: `Also print the fact database automatically compiled from the workspace manifests`})
-  verbose: boolean = false;
+  static paths = [
+    [`constraints`, `source`],
+  ];
 
   static usage: Usage = Command.Usage({
     category: `Constraints-related commands`,
@@ -24,8 +23,13 @@ export default class ConstraintsSourceCommand extends BaseCommand {
     ]],
   });
 
-  @Command.Path(`constraints`, `source`)
+  verbose = Option.Boolean(`-v,--verbose`, false, {
+    description: `Also print the fact database automatically compiled from the workspace manifests`,
+  });
+
   async execute() {
+    const {Constraints} = await import(`../../Constraints`);
+
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
     const {project} = await Project.find(configuration, this.context.cwd);
     const constraints = await Constraints.find(project);

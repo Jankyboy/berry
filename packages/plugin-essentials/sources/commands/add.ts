@@ -1,48 +1,20 @@
-import {BaseCommand, WorkspaceRequiredError}                        from '@yarnpkg/cli';
-import {Cache, Configuration, Descriptor, LightReport, MessageName} from '@yarnpkg/core';
-import {Project, StreamReport, Workspace, Ident}                    from '@yarnpkg/core';
-import {structUtils}                                                from '@yarnpkg/core';
-import {PortablePath}                                               from '@yarnpkg/fslib';
-import {Command, Usage, UsageError}                                 from 'clipanion';
-import {prompt}                                                     from 'enquirer';
+import {BaseCommand, WorkspaceRequiredError}                                     from '@yarnpkg/cli';
+import {Cache, Configuration, Descriptor, formatUtils, LightReport, MessageName} from '@yarnpkg/core';
+import {Project, Workspace, Ident, InstallMode}                                  from '@yarnpkg/core';
+import {structUtils}                                                             from '@yarnpkg/core';
+import {PortablePath}                                                            from '@yarnpkg/fslib';
+import {Command, Option, Usage, UsageError}                                      from 'clipanion';
+import {prompt}                                                                  from 'enquirer';
+import * as t                                                                    from 'typanion';
 
-import * as suggestUtils                                            from '../suggestUtils';
-import {Hooks}                                                      from '..';
+import * as suggestUtils                                                         from '../suggestUtils';
+import {Hooks}                                                                   from '..';
 
 // eslint-disable-next-line arca/no-default-export
 export default class AddCommand extends BaseCommand {
-  @Command.Rest()
-  packages: Array<string> = [];
-
-  @Command.Boolean(`--json`, {description: `Format the output as an NDJSON stream`})
-  json: boolean = false;
-
-  @Command.Boolean(`-E,--exact`, {description: `Don't use any semver modifier on the resolved range`})
-  exact: boolean = false;
-
-  @Command.Boolean(`-T,--tilde`, {description: `Use the \`~\` semver modifier on the resolved range`})
-  tilde: boolean = false;
-
-  @Command.Boolean(`-C,--caret`, {description: `Use the \`^\` semver modifier on the resolved range`})
-  caret: boolean = false;
-
-  @Command.Boolean(`-D,--dev`, {description: `Add a package as a dev dependency`})
-  dev: boolean = false;
-
-  @Command.Boolean(`-P,--peer`, {description: `Add a package as a peer dependency`})
-  peer: boolean = false;
-
-  @Command.Boolean(`-O,--optional`, {description: `Add / upgrade a package to an optional regular / peer dependency`})
-  optional: boolean = false;
-
-  @Command.Boolean(`--prefer-dev`, {description: `Add / upgrade a package to a dev dependency`})
-  preferDev: boolean = false;
-
-  @Command.Boolean(`-i,--interactive`, {description: `Reuse the specified package from other workspaces in the project`})
-  interactive: boolean | null = null;
-
-  @Command.Boolean(`--cached`, {description: `Reuse the highest version already used somewhere within the project`})
-  cached: boolean = false;
+  static paths = [
+    [`add`],
+  ];
 
   static usage: Usage = Command.Usage({
     description: `add dependencies to the project`,
@@ -59,13 +31,19 @@ export default class AddCommand extends BaseCommand {
 
       - If the added package doesn't specify a range at all its \`latest\` tag will be resolved and the returned version will be used to generate a new semver range (using the \`^\` modifier by default unless otherwise configured via the \`defaultSemverRangePrefix\` configuration, or the \`~\` modifier if \`-T,--tilde\` is specified, or no modifier at all if \`-E,--exact\` is specified). Two exceptions to this rule: the first one is that if the package is a workspace then its local version will be used, and the second one is that if you use \`-P,--peer\` the default range will be \`*\` and won't be resolved at all.
 
-      - If the added package specifies a tag range (such as \`latest\` or \`rc\`), Yarn will resolve this tag to a semver version and use that in the resulting package.json entry (meaning that \`yarn add foo@latest\` will have exactly the same effect as \`yarn add foo\`).
+      - If the added package specifies a range (such as \`^1.0.0\`, \`latest\`, or \`rc\`), Yarn will add this range as-is in the resulting package.json entry (in particular, tags such as \`rc\` will be encoded as-is rather than being converted into a semver range).
 
       If the \`--cached\` option is used, Yarn will preferably reuse the highest version already used somewhere within the project, even if through a transitive dependency.
 
       If the \`-i,--interactive\` option is used (or if the \`preferInteractive\` settings is toggled on) the command will first try to check whether other workspaces in the project use the specified package and, if so, will offer to reuse them.
 
-      For a compilation of all the supported protocols, please consult the dedicated page from our website: https://yarnpkg.com/features/protocols.
+      If the \`--mode=<mode>\` option is set, Yarn will change which artifacts are generated. The modes currently supported are:
+
+      - \`skip-build\` will not run the build scripts at all. Note that this is different from setting \`enableScripts\` to false because the latter will disable build scripts, and thus affect the content of the artifacts generated on disk, whereas the former will just disable the build step - but not the scripts themselves, which just won't run.
+
+      - \`update-lockfile\` will skip the link step altogether, and only fetch packages that are missing from the lockfile (or that have no associated checksums). This mode is typically used by tools like Renovate or Dependabot to keep a lockfile up-to-date without incurring the full install cost.
+
+      For a compilation of all the supported protocols, please consult the dedicated page from our website: https://yarnpkg.com/protocols.
     `,
     examples: [[
       `Add a regular package to the current workspace`,
@@ -85,10 +63,65 @@ export default class AddCommand extends BaseCommand {
     ], [
       `Add a package from a specific branch of a GitHub repository to the current workspace using the GitHub protocol (shorthand)`,
       `$0 add lodash-es@lodash/lodash#es`,
+    ], [
+      `Add a local package (gzipped tarball format) to the current workspace`,
+      `$0 add local-package-name@file:../path/to/local-package-name-v0.1.2.tgz`,
     ]],
   });
 
-  @Command.Path(`add`)
+  json = Option.Boolean(`--json`, false, {
+    description: `Format the output as an NDJSON stream`,
+  });
+
+  fixed = Option.Boolean(`-F,--fixed`, false, {
+    description: `Store dependency tags as-is instead of resolving them`,
+  });
+
+  exact = Option.Boolean(`-E,--exact`, false, {
+    description: `Don't use any semver modifier on the resolved range`,
+  });
+
+  tilde = Option.Boolean(`-T,--tilde`, false, {
+    description: `Use the \`~\` semver modifier on the resolved range`,
+  });
+
+  caret = Option.Boolean(`-C,--caret`, false, {
+    description: `Use the \`^\` semver modifier on the resolved range`,
+  });
+
+  dev = Option.Boolean(`-D,--dev`, false, {
+    description: `Add a package as a dev dependency`,
+  });
+
+  peer = Option.Boolean(`-P,--peer`, false, {
+    description: `Add a package as a peer dependency`,
+  });
+
+  optional = Option.Boolean(`-O,--optional`, false, {
+    description: `Add / upgrade a package to an optional regular / peer dependency`,
+  });
+
+  preferDev = Option.Boolean(`--prefer-dev`, false, {
+    description: `Add / upgrade a package to a dev dependency`,
+  });
+
+  interactive = Option.Boolean(`-i,--interactive`, {
+    description: `Reuse the specified package from other workspaces in the project`,
+  });
+
+  cached = Option.Boolean(`--cached`, false, {
+    description: `Reuse the highest version already used somewhere within the project`,
+  });
+
+  mode = Option.String(`--mode`, {
+    description: `Change what artifacts installs generate`,
+    validator: t.isEnum(InstallMode),
+  });
+
+  silent = Option.Boolean(`--silent`, {hidden: true});
+
+  packages = Option.Rest();
+
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
     const {project, workspace} = await Project.find(configuration, this.context.cwd);
@@ -97,20 +130,32 @@ export default class AddCommand extends BaseCommand {
     if (!workspace)
       throw new WorkspaceRequiredError(project.cwd, this.context.cwd);
 
-    const interactive = this.interactive ?? configuration.get(`preferInteractive`);
+    await project.restoreInstallState({
+      restoreResolutions: false,
+    });
+
+    const fixed = this.fixed;
+    const interactive = configuration.isInteractive({
+      interactive: this.interactive,
+      stdout: this.context.stdout,
+    });
+    const reuse = interactive || configuration.get(`preferReuse`);
 
     const modifier = suggestUtils.getModifier(this, project);
 
     const strategies = [
-      ...interactive ? [
-        suggestUtils.Strategy.REUSE,
-      ] : [],
+      reuse ?
+        suggestUtils.Strategy.REUSE
+        : undefined,
+
       suggestUtils.Strategy.PROJECT,
-      ...this.cached ? [
-        suggestUtils.Strategy.CACHE,
-      ] : [],
+
+      this.cached ?
+        suggestUtils.Strategy.CACHE
+        : undefined,
+
       suggestUtils.Strategy.LATEST,
-    ];
+    ].filter((strategy): strategy is suggestUtils.Strategy => typeof strategy !== `undefined`);
 
     const maxResults = interactive
       ? Infinity
@@ -119,26 +164,36 @@ export default class AddCommand extends BaseCommand {
     const allSuggestions = await Promise.all(this.packages.map(async pseudoDescriptor => {
       const request = pseudoDescriptor.match(/^\.{0,2}\//)
         ? await suggestUtils.extractDescriptorFromPath(pseudoDescriptor as PortablePath, {cwd: this.context.cwd, workspace})
-        : structUtils.parseDescriptor(pseudoDescriptor);
+        : structUtils.tryParseDescriptor(pseudoDescriptor);
 
-      const target = suggestTarget(workspace, request, {
+      const unsupportedPrefix = pseudoDescriptor.match(/^(https?:|git@github)/);
+      if (unsupportedPrefix)
+        throw new UsageError(`It seems you are trying to add a package using a ${formatUtils.pretty(configuration, `${unsupportedPrefix[0]}...`, formatUtils.Type.RANGE)} url; we now require package names to be explicitly specified.\nTry running the command again with the package name prefixed: ${formatUtils.pretty(configuration, `yarn add`, formatUtils.Type.CODE)} ${formatUtils.pretty(configuration, structUtils.makeDescriptor(structUtils.makeIdent(null, `my-package`), `${unsupportedPrefix[0]}...`), formatUtils.Type.DESCRIPTOR)}`);
+
+      if (!request)
+        throw new UsageError(`The ${formatUtils.pretty(configuration, pseudoDescriptor, formatUtils.Type.CODE)} string didn't match the required format (package-name@range). Did you perhaps forget to explicitly reference the package name?`);
+
+      const targetList = suggestTargetList(workspace, request, {
         dev: this.dev,
         peer: this.peer,
         preferDev: this.preferDev,
         optional: this.optional,
       });
 
-      const suggestions = await suggestUtils.getSuggestedDescriptors(request, {project, workspace, cache, target, modifier, strategies, maxResults});
+      const results = await Promise.all(targetList.map(async target => {
+        const suggestedDescriptors = await suggestUtils.getSuggestedDescriptors(request, {project, workspace, cache, fixed, target, modifier, strategies, maxResults});
+        return {request, suggestedDescriptors, target};
+      }));
 
-      return [request, suggestions, target] as const;
-    }));
+      return results;
+    })).then(results => results.flat());
 
     const checkReport = await LightReport.start({
       configuration,
       stdout: this.context.stdout,
       suggestInstall: false,
     }, async report => {
-      for (const [request, {suggestions, rejections}] of allSuggestions) {
+      for (const {request, suggestedDescriptors: {suggestions, rejections}} of allSuggestions) {
         const nonNullSuggestions = suggestions.filter(suggestion => {
           return suggestion.descriptor !== null;
         });
@@ -148,13 +203,13 @@ export default class AddCommand extends BaseCommand {
           if (typeof firstError === `undefined`)
             throw new Error(`Assertion failed: Expected an error to have been set`);
 
-          const prettyError = this.cli.error(firstError);
+          if (!project.configuration.get(`enableNetwork`))
+            report.reportError(MessageName.CANT_SUGGEST_RESOLUTIONS, `${structUtils.prettyDescriptor(configuration, request)} can't be resolved to a satisfying range (note: network resolution has been disabled)`);
+          else
+            report.reportError(MessageName.CANT_SUGGEST_RESOLUTIONS, `${structUtils.prettyDescriptor(configuration, request)} can't be resolved to a satisfying range`);
 
-          if (!project.configuration.get(`enableNetwork`)) {
-            report.reportError(MessageName.CANT_SUGGEST_RESOLUTIONS, `${structUtils.prettyDescriptor(configuration, request)} can't be resolved to a satisfying range (note: network resolution has been disabled):\n\n${prettyError}`);
-          } else {
-            report.reportError(MessageName.CANT_SUGGEST_RESOLUTIONS, `${structUtils.prettyDescriptor(configuration, request)} can't be resolved to a satisfying range:\n\n${prettyError}`);
-          }
+          report.reportSeparator();
+          report.reportExceptionOnce(firstError);
         }
       }
     });
@@ -168,17 +223,17 @@ export default class AddCommand extends BaseCommand {
       Workspace,
       suggestUtils.Target,
       Descriptor,
-      Array<suggestUtils.Strategy>
+      Array<suggestUtils.Strategy>,
     ]> = [];
 
     const afterWorkspaceDependencyReplacementList: Array<[
       Workspace,
       suggestUtils.Target,
       Descriptor,
-      Descriptor
+      Descriptor,
     ]> = [];
 
-    for (const [/*request*/, {suggestions}, target] of allSuggestions) {
+    for (const {suggestedDescriptors: {suggestions}, target} of allSuggestions) {
       let selected: Descriptor;
 
       const nonNullSuggestions = suggestions.filter(suggestion => {
@@ -268,20 +323,18 @@ export default class AddCommand extends BaseCommand {
     if (askedQuestions)
       this.context.stdout.write(`\n`);
 
-    const installReport = await StreamReport.start({
-      configuration,
+    return await project.installWithNewReport({
       json: this.json,
       stdout: this.context.stdout,
-      includeLogs: !this.context.quiet,
-    }, async report => {
-      await project.install({cache, report});
+      quiet: this.context.quiet,
+    }, {
+      cache,
+      mode: this.mode,
     });
-
-    return installReport.exitCode();
   }
 }
 
-function suggestTarget(workspace: Workspace, ident: Ident, {dev, peer, preferDev, optional}: {dev: boolean, peer: boolean, preferDev: boolean, optional: boolean}) {
+function suggestTargetList(workspace: Workspace, ident: Ident, {dev, peer, preferDev, optional}: {dev: boolean, peer: boolean, preferDev: boolean, optional: boolean}) {
   const hasRegular = workspace.manifest[suggestUtils.Target.REGULAR].has(ident.identHash);
   const hasDev = workspace.manifest[suggestUtils.Target.DEVELOPMENT].has(ident.identHash);
   const hasPeer = workspace.manifest[suggestUtils.Target.PEER].has(ident.identHash);
@@ -300,16 +353,23 @@ function suggestTarget(workspace: Workspace, ident: Ident, {dev, peer, preferDev
   if ((dev || preferDev) && optional)
     throw new UsageError(`Package "${structUtils.prettyIdent(workspace.project.configuration, ident)}" cannot simultaneously be a dev dependency and an optional dependency`);
 
-
+  // When the program executes this line, the command is expected to be legal
+  const targetList = [];
   if (peer)
-    return suggestUtils.Target.PEER;
+    targetList.push(suggestUtils.Target.PEER);
   if (dev || preferDev)
-    return suggestUtils.Target.DEVELOPMENT;
+    targetList.push(suggestUtils.Target.DEVELOPMENT);
+  if (optional)
+    targetList.push(suggestUtils.Target.REGULAR);
 
-  if (hasRegular)
-    return suggestUtils.Target.REGULAR;
+  // The user explicitly define the targets
+  if (targetList.length > 0)
+    return targetList;
+
+  // The user does not define the targets, find it from the `workspace.manifest`
   if (hasDev)
-    return suggestUtils.Target.DEVELOPMENT;
-
-  return suggestUtils.Target.REGULAR;
+    return [suggestUtils.Target.DEVELOPMENT];
+  if (hasPeer)
+    return [suggestUtils.Target.PEER];
+  return [suggestUtils.Target.REGULAR];
 }

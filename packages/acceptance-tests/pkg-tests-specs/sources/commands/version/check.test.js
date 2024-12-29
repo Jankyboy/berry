@@ -149,10 +149,6 @@ function makeVersionCheckEnv(cb) {
   return makeTemporaryEnv({
     private: true,
     workspaces: [`packages/*`],
-  }, {
-    plugins: [
-      require.resolve(`@yarnpkg/monorepo/scripts/plugin-version.js`),
-    ],
   }, async ({path, run, ...rest}) => {
     const git = (...args) => execFile(`git`, args, {cwd: path});
 
@@ -182,6 +178,7 @@ function makeVersionCheckEnv(cb) {
     // Otherwise we can't always commit
     await git(`config`, `user.name`, `John Doe`);
     await git(`config`, `user.email`, `john.doe@example.org`);
+    await git(`config`, `commit.gpgSign`, `false`);
 
     await git(`add`, `.`);
     await git(`commit`, `-m`, `First commit`);

@@ -1,10 +1,7 @@
 const {
   fs: {writeFile},
-  tests: {startPackageServer},
+  tests: {startPackageServer, validLogins},
 } = require(`pkg-tests-core`);
-
-const AUTH_TOKEN = `686159dc-64b3-413e-a244-2de2b8d1c36f`;
-const AUTH_IDENT = `dXNlcm5hbWU6YSB2ZXJ5IHNlY3VyZSBwYXNzd29yZA==`;
 
 const INVALID_AUTH_TOKEN = `a24cb960-e6a5-45fc-b9ab-0f9fe0aaae57`;
 const INVALID_AUTH_IDENT = `dXNlcm5hbWU6bm90IHRoZSByaWdodCBwYXNzd29yZA==`; // username:not the right password
@@ -14,7 +11,7 @@ describe(`Commands`, () => {
     test(
       `it should print the npm registry username when config has a valid npmAuthToken`,
       makeTemporaryEnv({}, async ({path, run, source}) => {
-        await writeFile(`${path}/.yarnrc.yml`, `npmAuthToken: "${AUTH_TOKEN}"\n`);
+        await writeFile(`${path}/.yarnrc.yml`, `npmAuthToken: "${validLogins.fooUser.npmAuthToken}"\n`);
 
         let code;
         let stdout;
@@ -27,13 +24,13 @@ describe(`Commands`, () => {
         }
 
         expect({code, stdout, stderr}).toMatchSnapshot();
-      })
+      }),
     );
 
     test(
       `it should print the npm registry username when config has a valid npmAuthIdent`,
       makeTemporaryEnv({}, async ({path, run, source}) => {
-        await writeFile(`${path}/.yarnrc.yml`, `npmAuthIdent: "${AUTH_IDENT}"\n`);
+        await writeFile(`${path}/.yarnrc.yml`, `npmAuthIdent: "${validLogins.fooUser.npmAuthIdent.encoded}"\n`);
 
         let code;
         let stdout;
@@ -46,7 +43,7 @@ describe(`Commands`, () => {
         }
 
         expect({code, stdout, stderr}).toMatchSnapshot();
-      })
+      }),
     );
 
     test(
@@ -55,12 +52,12 @@ describe(`Commands`, () => {
         const url = await startPackageServer();
 
         await writeFile(`${path}/.yarnrc.yml`, [
+          `npmRegistryServer: "${url}"\n`,
+          `npmAuthToken: "${validLogins.fooUser.npmAuthToken}"\n`,
           `npmScopes:\n`,
           `  testScope:\n`,
+          `    npmAuthToken: ${validLogins.barUser.npmAuthToken}\n`,
           `    npmRegistryServer: "${url}"\n`,
-          `npmRegistries:\n`,
-          `  "${url}":\n`,
-          `    npmAuthToken: ${AUTH_TOKEN}`,
         ].join(``));
 
         let code;
@@ -74,14 +71,14 @@ describe(`Commands`, () => {
         }
 
         expect({code, stdout, stderr}).toMatchSnapshot();
-      })
+      }),
     );
 
     test(
       `it should throw an error when no auth config is found`,
       makeTemporaryEnv({}, async ({path, run, source}) => {
         await expect(run(`npm`, `whoami`)).rejects.toThrowError(/No authentication configured/);
-      })
+      }),
     );
 
     test(
@@ -89,7 +86,7 @@ describe(`Commands`, () => {
       makeTemporaryEnv({}, async ({path, run, source}) => {
         await writeFile(`${path}/.yarnrc.yml`, `npmAuthToken: "${INVALID_AUTH_TOKEN}"\n`);
         await expect(run(`npm`, `whoami`)).rejects.toThrowError(/Invalid authentication \(as an unknown user\)/);
-      })
+      }),
     );
 
     test(
@@ -97,7 +94,7 @@ describe(`Commands`, () => {
       makeTemporaryEnv({}, async ({path, run, source}) => {
         await writeFile(`${path}/.yarnrc.yml`, `npmAuthIdent: "${INVALID_AUTH_IDENT}"\n`);
         await expect(run(`npm`, `whoami`)).rejects.toThrowError(/Invalid authentication \(as an unknown user\)/);
-      })
+      }),
     );
 
     test(
@@ -116,7 +113,7 @@ describe(`Commands`, () => {
 
         await expect(run(`npm`, `whoami`, `--scope`, `testScope`)).rejects.toThrowError(/Invalid authentication \(as an unknown user\)/);
         await expect(run(`npm`, `whoami`)).rejects.toThrowError(/Invalid authentication \(as an unknown user\)/);
-      })
+      }),
     );
   });
 });

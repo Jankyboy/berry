@@ -1,16 +1,16 @@
-import {Writable}                from 'stream';
+import {Writable}                             from 'stream';
 
-import {Configuration}           from './Configuration';
-import {MessageName}             from './MessageName';
-import {Report}                  from './Report';
-import {formatNameWithHyperlink} from './StreamReport';
-import * as formatUtils          from './formatUtils';
-import {Locator}                 from './types';
+import {Configuration}                        from './Configuration';
+import {MessageName}                          from './MessageName';
+import {Report, SectionOptions, TimerOptions} from './Report';
+import {formatNameWithHyperlink}              from './StreamReport';
+import * as formatUtils                       from './formatUtils';
+import {Locator}                              from './types';
 
 export type LightReportOptions = {
-  configuration: Configuration,
-  stdout: Writable,
-  suggestInstall?: boolean,
+  configuration: Configuration;
+  stdout: Writable;
+  suggestInstall?: boolean;
 };
 
 export class LightReport extends Report {
@@ -37,6 +37,8 @@ export class LightReport extends Report {
   constructor({configuration, stdout, suggestInstall = true}: LightReportOptions) {
     super();
 
+    formatUtils.addLogFilterSupport(this, {configuration});
+
     this.configuration = configuration;
     this.stdout = stdout;
     this.suggestInstall = suggestInstall;
@@ -56,16 +58,26 @@ export class LightReport extends Report {
   reportCacheMiss(locator: Locator) {
   }
 
-  startTimerSync<T>(what: string, cb: () => T) {
+  startSectionSync<T>(opts: SectionOptions, cb: () => T) {
     return cb();
   }
 
-  async startTimerPromise<T>(what: string, cb: () => Promise<T>) {
+  async startSectionPromise<T>(opts: SectionOptions, cb: () => Promise<T>) {
     return await cb();
   }
 
-  async startCacheReport<T>(cb: () => Promise<T>) {
-    return await cb();
+  startTimerSync<T>(what: string, opts: TimerOptions, cb: () => T): T;
+  startTimerSync<T>(what: string, cb: () => T): T;
+  startTimerSync<T>(what: string, opts: TimerOptions | (() => T), cb?: () => T) {
+    const realCb = typeof opts === `function` ? opts : cb!;
+    return realCb();
+  }
+
+  async startTimerPromise<T>(what: string, opts: TimerOptions, cb: () => Promise<T>): Promise<T>;
+  async startTimerPromise<T>(what: string, cb: () => Promise<T>): Promise<T>;
+  async startTimerPromise<T>(what: string, opts: TimerOptions | (() => Promise<T>), cb?: () => Promise<T>) {
+    const realCb = typeof opts === `function` ? opts : cb!;
+    return await realCb();
   }
 
   reportSeparator() {
@@ -101,8 +113,13 @@ export class LightReport extends Report {
     // Just ignore the json output
   }
 
+  reportFold(title: string, text: string) {
+    // Just ignore the fold output
+  }
+
   async finalize() {
     if (this.errorCount > 0) {
+      this.stdout.write(`\n`);
       this.stdout.write(`${formatUtils.pretty(this.configuration, `➤`, `redBright`)} Errors happened when preparing the environment required to run this command.\n`);
 
       if (this.suggestInstall) {

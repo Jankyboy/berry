@@ -1,6 +1,12 @@
-import {PortablePath, npath} from '@yarnpkg/fslib';
-import crossSpawn            from 'cross-spawn';
-import {Readable, Writable}  from 'stream';
+import {PortablePath, npath, ppath, BufferEncodingOrBuffer} from '@yarnpkg/fslib';
+import {ChildProcess}                                       from 'child_process';
+import crossSpawn                                           from 'cross-spawn';
+import {Readable, Writable}                                 from 'stream';
+
+import {Configuration}                                      from './Configuration';
+import {MessageName}                                        from './MessageName';
+import {Report, ReportError}                                from './Report';
+import * as formatUtils                                     from './formatUtils';
 
 export enum EndStrategy {
   Never,
@@ -9,29 +15,73 @@ export enum EndStrategy {
 }
 
 export type PipevpOptions = {
-  cwd: PortablePath,
-  env?: {[key: string]: string | undefined},
-  end?: EndStrategy,
-  strict?: boolean,
-  stdin: Readable | null,
-  stdout: Writable,
-  stderr: Writable,
+  cwd: PortablePath;
+  env?: {[key: string]: string | undefined};
+  end?: EndStrategy;
+  strict?: boolean;
+  stdin: Readable | null;
+  stdout: Writable;
+  stderr: Writable;
 };
+
+export type PipeErrorOptions = {
+  fileName: string;
+  code: number | null;
+  signal: NodeJS.Signals | null;
+};
+
+export class PipeError extends ReportError {
+  code: number;
+
+  constructor({fileName, code, signal}: PipeErrorOptions) {
+    // It doesn't matter whether we create a new Configuration from the cwd or from a
+    // temp directory since in none of these cases the user's rc values will be respected.
+    // TODO: find a way to respect them
+    const configuration = Configuration.create(ppath.cwd());
+    const prettyFileName = formatUtils.pretty(configuration, fileName, formatUtils.Type.PATH);
+
+    super(MessageName.EXCEPTION, `Child ${prettyFileName} reported an error`, report => {
+      reportExitStatus(code, signal, {configuration, report});
+    });
+
+    this.code = getExitCode(code, signal);
+  }
+}
+
+export type ExecErrorOptions = PipeErrorOptions & {
+  stdout: Buffer | string;
+  stderr: Buffer | string;
+};
+
+export class ExecError extends PipeError {
+  stdout: Buffer | string;
+  stderr: Buffer | string;
+
+  constructor({fileName, code, signal, stdout, stderr}: ExecErrorOptions) {
+    super({fileName, code, signal});
+
+    this.stdout = stdout;
+    this.stderr = stderr;
+  }
+}
 
 function hasFd(stream: null | Readable | Writable) {
   // @ts-expect-error: Not sure how to typecheck this field
   return stream !== null && typeof stream.fd === `number`;
 }
 
+const activeChildren = new Set<ChildProcess>();
+
 function sigintHandler() {
   // We don't want SIGINT to kill our process; we want it to kill the
   // innermost process, whose end will cause our own to exit.
 }
 
-// Rather than attaching one SIGINT handler for each process, we
-// attach a single one and use a refcount to detect once it's no
-// longer needed.
-let sigintRefCount = 0;
+function sigtermHandler() {
+  for (const child of activeChildren) {
+    child.kill();
+  }
+}
 
 export async function pipevp(fileName: string, args: Array<string>, {cwd, env = process.env, strict = false, stdin = null, stdout, stderr, end = EndStrategy.Always}: PipevpOptions): Promise<{code: number}> {
   const stdio: Array<any> = [`pipe`, `pipe`, `pipe`];
@@ -46,9 +96,6 @@ export async function pipevp(fileName: string, args: Array<string>, {cwd, env = 
   if (hasFd(stderr))
     stdio[2] = stderr;
 
-  if (sigintRefCount++ === 0)
-    process.on(`SIGINT`, sigintHandler);
-
   const child = crossSpawn(fileName, args, {
     cwd: npath.fromPortablePath(cwd),
     env: {
@@ -57,6 +104,13 @@ export async function pipevp(fileName: string, args: Array<string>, {cwd, env = 
     },
     stdio,
   });
+
+  activeChildren.add(child);
+
+  if (activeChildren.size === 1) {
+    process.on(`SIGINT`, sigintHandler);
+    process.on(`SIGTERM`, sigtermHandler);
+  }
 
   if (!hasFd(stdin) && stdin !== null)
     stdin.pipe(child.stdin!);
@@ -76,8 +130,12 @@ export async function pipevp(fileName: string, args: Array<string>, {cwd, env = 
 
   return new Promise((resolve, reject) => {
     child.on(`error`, error => {
-      if (--sigintRefCount === 0)
+      activeChildren.delete(child);
+
+      if (activeChildren.size === 0) {
         process.off(`SIGINT`, sigintHandler);
+        process.off(`SIGTERM`, sigtermHandler);
+      }
 
       if (end === EndStrategy.Always || end === EndStrategy.ErrorCode)
         closeStreams();
@@ -85,29 +143,31 @@ export async function pipevp(fileName: string, args: Array<string>, {cwd, env = 
       reject(error);
     });
 
-    child.on(`close`, (code, sig) => {
-      if (--sigintRefCount === 0)
-        process.off(`SIGINT`, sigintHandler);
+    child.on(`close`, (code, signal) => {
+      activeChildren.delete(child);
 
-      if (end === EndStrategy.Always || (end === EndStrategy.ErrorCode && code > 0))
+      if (activeChildren.size === 0) {
+        process.off(`SIGINT`, sigintHandler);
+        process.off(`SIGTERM`, sigtermHandler);
+      }
+
+      if (end === EndStrategy.Always || (end === EndStrategy.ErrorCode && code !== 0))
         closeStreams();
 
       if (code === 0 || !strict) {
-        resolve({code: getExitCode(code, sig)});
-      } else if (code !== null) {
-        reject(new Error(`Child "${fileName}" exited with exit code ${code}`));
+        resolve({code: getExitCode(code, signal)});
       } else {
-        reject(new Error(`Child "${fileName}" exited with signal ${sig}`));
+        reject(new PipeError({fileName, code, signal}));
       }
     });
   });
 }
 
 export type ExecvpOptions = {
-  cwd: PortablePath,
-  env?: {[key: string]: string | undefined},
-  encoding?: string,
-  strict?: boolean,
+  cwd: PortablePath;
+  env?: {[key: string]: string | undefined};
+  encoding?: BufferEncodingOrBuffer;
+  strict?: boolean;
 };
 
 export async function execvp(fileName: string, args: Array<string>, opts: ExecvpOptions & {encoding: 'buffer'}): Promise<{code: number, stdout: Buffer, stderr: Buffer}>;
@@ -140,7 +200,18 @@ export async function execvp(fileName: string, args: Array<string>, {cwd, env = 
   });
 
   return await new Promise((resolve, reject) => {
-    subprocess.on(`error`, reject);
+    subprocess.on(`error`, err => {
+      const configuration = Configuration.create(cwd);
+      const prettyFileName = formatUtils.pretty(configuration, fileName, formatUtils.Type.PATH);
+
+      reject(new ReportError(MessageName.EXCEPTION, `Process ${prettyFileName} failed to spawn`, report => {
+        report.reportError(MessageName.EXCEPTION, `  ${formatUtils.prettyField(configuration, {
+          label: `Thrown Error`,
+          value: formatUtils.tuple(formatUtils.Type.NO_HINT, err.message),
+        })}`);
+      }));
+    });
+
     subprocess.on(`close`, (code, signal) => {
       const stdout = encoding === `buffer`
         ? Buffer.concat(stdoutChunks)
@@ -155,9 +226,7 @@ export async function execvp(fileName: string, args: Array<string>, {cwd, env = 
           code: getExitCode(code, signal), stdout, stderr,
         });
       } else {
-        reject(Object.assign(new Error(`Child "${fileName}" exited with exit code ${code}\n\n${stderr}`), {
-          code: getExitCode(code, signal), stdout, stderr,
-        }));
+        reject(new ExecError({fileName, code, signal, stdout, stderr}));
       }
     });
   });
@@ -177,4 +246,14 @@ function getExitCode(code: number | null, signal: NodeJS.Signals | null): number
   } else {
     return code ?? 1;
   }
+}
+
+function reportExitStatus(code: number | null, signal: string | null, {configuration, report}: {configuration: Configuration, report: Report}) {
+  report.reportError(MessageName.EXCEPTION, `  ${formatUtils.prettyField(configuration, code !== null ? {
+    label: `Exit Code`,
+    value: formatUtils.tuple(formatUtils.Type.NUMBER, code),
+  } : {
+    label: `Exit Signal`,
+    value: formatUtils.tuple(formatUtils.Type.CODE, signal),
+  })}`);
 }

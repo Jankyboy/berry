@@ -1,18 +1,13 @@
-import {WorkspaceRequiredError}                            from "@yarnpkg/cli";
-import {CommandContext, Configuration, Project, Workspace} from "@yarnpkg/core";
-import {structUtils}                                       from "@yarnpkg/core";
-import {Command, Usage, UsageError}                        from "clipanion";
+import {WorkspaceRequiredError, BaseCommand} from '@yarnpkg/cli';
+import {Configuration, Project}              from '@yarnpkg/core';
+import {structUtils}                         from '@yarnpkg/core';
+import {Command, Option, Usage, UsageError}  from 'clipanion';
 
 // eslint-disable-next-line arca/no-default-export
-export default class WorkspaceCommand extends Command<CommandContext> {
-  @Command.String()
-  workspaceName!: string;
-
-  @Command.String()
-  commandName!: string;
-
-  @Command.Proxy()
-  args: Array<string> = [];
+export default class WorkspaceCommand extends BaseCommand {
+  static paths = [
+    [`workspace`],
+  ];
 
   static usage: Usage = Command.Usage({
     category: `Workspace-related commands`,
@@ -29,7 +24,11 @@ export default class WorkspaceCommand extends Command<CommandContext> {
     ]],
   });
 
-  @Command.Path(`workspace`)
+  workspaceName = Option.String();
+  commandName = Option.String();
+
+  args = Option.Proxy();
+
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
     const {project, workspace: cwdWorkspace} = await Project.find(configuration, this.context.cwd);
@@ -40,11 +39,8 @@ export default class WorkspaceCommand extends Command<CommandContext> {
     const candidates = project.workspaces;
     const candidatesByName = new Map(
       candidates.map(
-        (workspace): [string, Workspace] => {
-          const ident = structUtils.convertToIdent(workspace.locator);
-          return [structUtils.stringifyIdent(ident), workspace];
-        }
-      )
+        workspace => [structUtils.stringifyIdent(workspace.anchoredLocator), workspace],
+      ),
     );
 
     const workspace = candidatesByName.get(this.workspaceName);

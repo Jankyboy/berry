@@ -1,19 +1,14 @@
-import {BaseCommand}                 from '@yarnpkg/cli';
-import {Configuration, StreamReport} from '@yarnpkg/core';
-import {Command, Usage, UsageError}  from 'clipanion';
-import getPath                       from 'lodash/get';
-import {inspect}                     from 'util';
+import {BaseCommand}                            from '@yarnpkg/cli';
+import {Configuration, StreamReport, miscUtils} from '@yarnpkg/core';
+import {Command, Option, Usage, UsageError}     from 'clipanion';
+import getPath                                  from 'lodash/get';
+import {inspect}                                from 'util';
 
 // eslint-disable-next-line arca/no-default-export
-export default class ConfigSetCommand extends BaseCommand {
-  @Command.String()
-  name!: string;
-
-  @Command.Boolean(`--json`, {description: `Format the output as an NDJSON stream`})
-  json: boolean = false;
-
-  @Command.Boolean(`--no-redacted`, {description: `Don't redact secrets (such as tokens) from the output`})
-  unsafe: boolean = false;
+export default class ConfigGetCommand extends BaseCommand {
+  static paths = [
+    [`config`, `get`],
+  ];
 
   static usage: Usage = Command.Usage({
     description: `read a configuration settings`,
@@ -40,7 +35,20 @@ export default class ConfigSetCommand extends BaseCommand {
     ]],
   });
 
-  @Command.Path(`config`, `get`)
+  why = Option.Boolean(`--why`, false, {
+    description: `Print the explanation for why a setting has its value`,
+  });
+
+  json = Option.Boolean(`--json`, false, {
+    description: `Format the output as an NDJSON stream`,
+  });
+
+  unsafe = Option.Boolean(`--no-redacted`, false, {
+    description: `Don't redact secrets (such as tokens) from the output`,
+  });
+
+  name = Option.String();
+
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
 
@@ -56,7 +64,7 @@ export default class ConfigSetCommand extends BaseCommand {
       getNativePaths: true,
     });
 
-    const asObject = convertMapsToObjects(displayedValue);
+    const asObject = miscUtils.convertMapsToIndexableObjects(displayedValue);
     const requestedObject = path
       ? getPath(asObject, path)
       : asObject;
@@ -88,23 +96,4 @@ export default class ConfigSetCommand extends BaseCommand {
 
     return report.exitCode();
   }
-}
-
-/**
- * Converts `Maps` to `Objects` recursively.
- */
-export function convertMapsToObjects(arg: unknown): unknown {
-  if (arg instanceof Map)
-    arg = Object.fromEntries(arg);
-
-  if (typeof arg === `object` && arg !== null) {
-    for (const key of Object.keys(arg)) {
-      const value = arg[key as keyof object] as unknown;
-      if (typeof value === `object` && value !== null) {
-        (arg[key as keyof object] as unknown) = convertMapsToObjects(value);
-      }
-    }
-  }
-
-  return arg;
 }

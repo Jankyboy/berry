@@ -1,26 +1,16 @@
-import {BaseCommand}                              from '@yarnpkg/cli';
-import {Configuration, StreamReport, MessageName} from '@yarnpkg/core';
-import {Command, Usage, UsageError}               from 'clipanion';
-import cloneDeep                                  from 'lodash/cloneDeep';
-import getPath                                    from 'lodash/get';
-import setPath                                    from 'lodash/set';
-import {inspect}                                  from 'util';
-
-import {convertMapsToObjects}                     from './get';
+import {BaseCommand}                                         from '@yarnpkg/cli';
+import {Configuration, StreamReport, MessageName, miscUtils} from '@yarnpkg/core';
+import {Command, Option, Usage, UsageError}                  from 'clipanion';
+import cloneDeep                                             from 'lodash/cloneDeep';
+import getPath                                               from 'lodash/get';
+import setPath                                               from 'lodash/set';
+import {inspect}                                             from 'util';
 
 // eslint-disable-next-line arca/no-default-export
 export default class ConfigSetCommand extends BaseCommand {
-  @Command.String()
-  name!: string;
-
-  @Command.String()
-  value!: string;
-
-  @Command.Boolean(`--json`, {description: `Set complex configuration settings to JSON values`})
-  json: boolean = false;
-
-  @Command.Boolean(`-H,--home`, {description: `Update the home configuration instead of the project configuration`})
-  home: boolean = false;
+  static paths = [
+    [`config`, `set`],
+  ];
 
   static usage: Usage = Command.Usage({
     description: `change a configuration settings`,
@@ -43,14 +33,35 @@ export default class ConfigSetCommand extends BaseCommand {
     ], [
       `Set a complex configuration setting (an Object) using the \`--json\` flag`,
       `yarn config set packageExtensions --json '{ "@babel/parser@*": { "dependencies": { "@babel/types": "*" } } }'`,
+    ], [
+      `Set a nested configuration setting`,
+      `yarn config set npmScopes.company.npmRegistryServer "https://npm.example.com"`,
+    ], [
+      `Set a nested configuration setting using indexed access for non-simple keys`,
+      `yarn config set 'npmRegistries["//npm.example.com"].npmAuthToken' "ffffffff-ffff-ffff-ffff-ffffffffffff"`,
     ]],
   });
 
-  @Command.Path(`config`, `set`)
+  json = Option.Boolean(`--json`, false, {
+    description: `Set complex configuration settings to JSON values`,
+  });
+
+  home = Option.Boolean(`-H,--home`, false, {
+    description: `Update the home configuration instead of the project configuration`,
+  });
+
+  name = Option.String();
+  value = Option.String();
+
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
-    if (!configuration.projectCwd)
-      throw new UsageError(`This command must be run from within a project folder`);
+
+    const assertProjectCwd = () => {
+      if (!configuration.projectCwd)
+        throw new UsageError(`This command must be run from within a project folder`);
+
+      return configuration.projectCwd;
+    };
 
     const name = this.name.replace(/[.[].*$/, ``);
     const path = this.name.replace(/^[^.[]*\.?/, ``);
@@ -59,14 +70,17 @@ export default class ConfigSetCommand extends BaseCommand {
     if (typeof setting === `undefined`)
       throw new UsageError(`Couldn't find a configuration settings named "${name}"`);
 
+    if (name === `enableStrictSettings`)
+      throw new UsageError(`This setting only affects the file it's in, and thus cannot be set from the CLI`);
+
     const value: unknown = this.json
       ? JSON.parse(this.value)
       : this.value;
 
-    const updateConfiguration: (patch: ((current: any) => any)) => Promise<void> =
+    const updateConfiguration: (patch: ((current: any) => any)) => Promise<boolean> =
       this.home
         ? patch => Configuration.updateHomeConfiguration(patch)
-        : patch => Configuration.updateConfiguration(configuration.projectCwd!, patch);
+        : patch => Configuration.updateConfiguration(assertProjectCwd(), patch);
 
     await updateConfiguration(current => {
       if (path) {
@@ -87,7 +101,7 @@ export default class ConfigSetCommand extends BaseCommand {
       getNativePaths: true,
     });
 
-    const asObject = convertMapsToObjects(displayedValue);
+    const asObject = miscUtils.convertMapsToIndexableObjects(displayedValue);
     const requestedObject = path
       ? getPath(asObject, path)
       : asObject;

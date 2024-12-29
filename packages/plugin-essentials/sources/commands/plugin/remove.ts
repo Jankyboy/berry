@@ -1,12 +1,13 @@
 import {BaseCommand}                                                                 from '@yarnpkg/cli';
 import {Configuration, MessageName, Project, StreamReport, formatUtils, structUtils} from '@yarnpkg/core';
 import {PortablePath, ppath, xfs}                                                    from '@yarnpkg/fslib';
-import {Command, Usage, UsageError}                                                  from 'clipanion';
+import {Command, Option, Usage, UsageError}                                          from 'clipanion';
 
 // eslint-disable-next-line arca/no-default-export
 export default class PluginRemoveCommand extends BaseCommand {
-  @Command.String()
-  name!: string;
+  static paths = [
+    [`plugin`, `remove`],
+  ];
 
   static usage: Usage = Command.Usage({
     category: `Plugin-related commands`,
@@ -25,7 +26,8 @@ export default class PluginRemoveCommand extends BaseCommand {
     ]],
   });
 
-  @Command.Path(`plugin`, `remove`)
+  name = Option.String();
+
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
     const {project} = await Project.find(configuration, this.context.cwd);
@@ -49,21 +51,23 @@ export default class PluginRemoveCommand extends BaseCommand {
       }
 
       report.reportInfo(MessageName.UNNAMED, `Updating the configuration...`);
-      await Configuration.updateConfiguration(project.cwd, (current: {[key: string]: unknown}) => {
-        if (!Array.isArray(current.plugins))
-          return current;
+      await Configuration.updateConfiguration(project.cwd, {
+        plugins: plugins => {
+          if (!Array.isArray(plugins))
+            return plugins;
 
-        const plugins = current.plugins.filter((plugin: {path: string}) => {
-          return plugin.path !== relativePath;
-        });
+          const filteredPlugins = plugins.filter((plugin: {path: string}) => {
+            return plugin.path !== relativePath;
+          });
 
-        if (current.plugins.length === plugins.length)
-          return current;
+          if (filteredPlugins.length === 0)
+            return Configuration.deleteProperty;
 
-        return {
-          ...current,
-          plugins,
-        };
+          if (filteredPlugins.length === plugins.length)
+            return plugins;
+
+          return filteredPlugins;
+        },
       });
     });
 

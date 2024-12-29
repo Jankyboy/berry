@@ -1,16 +1,14 @@
-import {BaseCommand, WorkspaceRequiredError}                                                                     from '@yarnpkg/cli';
-import {Configuration, Project, Ident, structUtils, ReportError, MessageName, formatUtils, treeUtils, miscUtils} from '@yarnpkg/core';
-import {ppath, Filename}                                                                                         from '@yarnpkg/fslib';
-import {npmHttpUtils}                                                                                            from '@yarnpkg/plugin-npm';
-import {Command, UsageError, Usage}                                                                              from 'clipanion';
+import {BaseCommand, WorkspaceRequiredError}                                           from '@yarnpkg/cli';
+import {Configuration, Project, Ident, structUtils, formatUtils, treeUtils, miscUtils} from '@yarnpkg/core';
+import {ppath, Filename, npath}                                                        from '@yarnpkg/fslib';
+import {npmHttpUtils}                                                                  from '@yarnpkg/plugin-npm';
+import {Command, UsageError, Usage, Option}                                            from 'clipanion';
 
 // eslint-disable-next-line arca/no-default-export
 export default class NpmTagListCommand extends BaseCommand {
-  @Command.String({required: false})
-  package?: string;
-
-  @Command.Boolean(`--json`, {description: `Format the output as an NDJSON stream`})
-  json: boolean = false;
+  static paths = [
+    [`npm`, `tag`, `list`],
+  ];
 
   static usage: Usage = Command.Usage({
     category: `Npm-related commands`,
@@ -26,7 +24,12 @@ export default class NpmTagListCommand extends BaseCommand {
     ]],
   });
 
-  @Command.Path(`npm`, `tag`, `list`)
+  json = Option.Boolean(`--json`, false, {
+    description: `Format the output as an NDJSON stream`,
+  });
+
+  package = Option.String({required: false});
+
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
     const {project, workspace} = await Project.find(configuration, this.context.cwd);
@@ -39,7 +42,7 @@ export default class NpmTagListCommand extends BaseCommand {
         throw new WorkspaceRequiredError(project.cwd, this.context.cwd);
 
       if (!workspace.manifest.name)
-        throw new UsageError(`Missing 'name' field in ${ppath.join(workspace.cwd, Filename.manifest)}`);
+        throw new UsageError(`Missing 'name' field in ${npath.fromPortablePath(ppath.join(workspace.cwd, Filename.manifest))}`);
 
       ident = workspace.manifest.name;
     }
@@ -71,13 +74,6 @@ export async function getDistTags(ident: Ident, configuration: Configuration): P
     configuration,
     ident,
     jsonResponse: true,
-  }).catch(err => {
-    if (err.name !== `HTTPError`) {
-      throw err;
-    } else if (err.response.statusCode === 404) {
-      throw new ReportError(MessageName.EXCEPTION, `Package not found`);
-    } else {
-      throw new ReportError(MessageName.EXCEPTION, err.toString());
-    }
+    customErrorMessage: npmHttpUtils.customPackageError,
   });
 }

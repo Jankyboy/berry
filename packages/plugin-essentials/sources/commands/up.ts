@@ -1,39 +1,37 @@
-import {BaseCommand, WorkspaceRequiredError}                                                                        from '@yarnpkg/cli';
-import {Cache, Configuration, Descriptor, LightReport, MessageName, MinimalResolveOptions, formatUtils, FormatType} from '@yarnpkg/core';
-import {Project, StreamReport, Workspace}                                                                           from '@yarnpkg/core';
-import {structUtils}                                                                                                from '@yarnpkg/core';
-import {Command, Usage, UsageError}                                                                                 from 'clipanion';
-import {prompt}                                                                                                     from 'enquirer';
-import micromatch                                                                                                   from 'micromatch';
+import {BaseCommand, WorkspaceRequiredError}                                                            from '@yarnpkg/cli';
+import {IdentHash, structUtils}                                                                         from '@yarnpkg/core';
+import {Project, Workspace, InstallMode}                                                                from '@yarnpkg/core';
+import {Cache, Configuration, Descriptor, LightReport, MessageName, MinimalResolveOptions, formatUtils} from '@yarnpkg/core';
+import {Command, Option, Usage, UsageError}                                                             from 'clipanion';
+import {prompt}                                                                                         from 'enquirer';
+import micromatch                                                                                       from 'micromatch';
+import * as t                                                                                           from 'typanion';
 
-import * as suggestUtils                                                                                            from '../suggestUtils';
-import {Hooks}                                                                                                      from '..';
+import * as suggestUtils                                                                                from '../suggestUtils';
+import {Hooks}                                                                                          from '..';
 
 // eslint-disable-next-line arca/no-default-export
 export default class UpCommand extends BaseCommand {
-  @Command.Rest()
-  patterns: Array<string> = [];
-
-  @Command.Boolean(`-i,--interactive`, {description: `Offer various choices, depending on the detected upgrade paths`})
-  interactive: boolean | null = null;
-
-  @Command.Boolean(`-E,--exact`, {description: `Don't use any semver modifier on the resolved range`})
-  exact: boolean = false;
-
-  @Command.Boolean(`-T,--tilde`, {description: `Use the \`~\` semver modifier on the resolved range`})
-  tilde: boolean = false;
-
-  @Command.Boolean(`-C,--caret`, {description: `Use the \`^\` semver modifier on the resolved range`})
-  caret: boolean = false;
+  static paths = [
+    [`up`],
+  ];
 
   static usage: Usage = Command.Usage({
     description: `upgrade dependencies across the project`,
     details: `
       This command upgrades the packages matching the list of specified patterns to their latest available version across the whole project (regardless of whether they're part of \`dependencies\` or \`devDependencies\` - \`peerDependencies\` won't be affected). This is a project-wide command: all workspaces will be upgraded in the process.
 
+      If \`-R,--recursive\` is set the command will change behavior and no other switch will be allowed. When operating under this mode \`yarn up\` will force all ranges matching the selected packages to be resolved again (often to the highest available versions) before being stored in the lockfile. It however won't touch your manifests anymore, so depending on your needs you might want to run both \`yarn up\` and \`yarn up -R\` to cover all bases.
+
       If \`-i,--interactive\` is set (or if the \`preferInteractive\` settings is toggled on) the command will offer various choices, depending on the detected upgrade paths. Some upgrades require this flag in order to resolve ambiguities.
 
       The, \`-C,--caret\`, \`-E,--exact\` and  \`-T,--tilde\` options have the same meaning as in the \`add\` command (they change the modifier used when the range is missing or a tag, and are ignored when the range is explicitly set).
+
+      If the \`--mode=<mode>\` option is set, Yarn will change which artifacts are generated. The modes currently supported are:
+
+      - \`skip-build\` will not run the build scripts at all. Note that this is different from setting \`enableScripts\` to false because the latter will disable build scripts, and thus affect the content of the artifacts generated on disk, whereas the former will just disable the build step - but not the scripts themselves, which just won't run.
+
+      - \`update-lockfile\` will skip the link step altogether, and only fetch packages that are missing from the lockfile (or that have no associated checksums). This mode is typically used by tools like Renovate or Dependabot to keep a lockfile up-to-date without incurring the full install cost.
 
       Generally you can see \`yarn up\` as a counterpart to what was \`yarn upgrade --latest\` in Yarn 1 (ie it ignores the ranges previously listed in your manifests), but unlike \`yarn upgrade\` which only upgraded dependencies in the current workspace, \`yarn up\` will upgrade all workspaces at the same time.
 
@@ -62,8 +60,50 @@ export default class UpCommand extends BaseCommand {
     ]],
   });
 
-  @Command.Path(`up`)
+  interactive = Option.Boolean(`-i,--interactive`, {
+    description: `Offer various choices, depending on the detected upgrade paths`,
+  });
+
+  fixed = Option.Boolean(`-F,--fixed`, false, {
+    description: `Store dependency tags as-is instead of resolving them`,
+  });
+
+  exact = Option.Boolean(`-E,--exact`, false, {
+    description: `Don't use any semver modifier on the resolved range`,
+  });
+
+  tilde = Option.Boolean(`-T,--tilde`, false, {
+    description: `Use the \`~\` semver modifier on the resolved range`,
+  });
+
+  caret = Option.Boolean(`-C,--caret`, false, {
+    description: `Use the \`^\` semver modifier on the resolved range`,
+  });
+
+  recursive = Option.Boolean(`-R,--recursive`, false, {
+    description: `Resolve again ALL resolutions for those packages`,
+  });
+
+  mode = Option.String(`--mode`, {
+    description: `Change what artifacts installs generate`,
+    validator: t.isEnum(InstallMode),
+  });
+
+  patterns = Option.Rest();
+
+  static schema = [
+    t.hasKeyRelationship(`recursive`, t.KeyRelationship.Forbids, [`interactive`, `exact`, `tilde`, `caret`], {ignore: [undefined, false]}),
+  ];
+
   async execute() {
+    if (this.recursive) {
+      return await this.executeUpRecursive();
+    } else {
+      return await this.executeUpClassic();
+    }
+  }
+
+  async executeUpRecursive() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
     const {project, workspace} = await Project.find(configuration, this.context.cwd);
     const cache = await Cache.find(configuration);
@@ -71,7 +111,61 @@ export default class UpCommand extends BaseCommand {
     if (!workspace)
       throw new WorkspaceRequiredError(project.cwd, this.context.cwd);
 
-    const interactive = this.interactive ?? configuration.get(`preferInteractive`);
+    await project.restoreInstallState({
+      restoreResolutions: false,
+    });
+
+    const allDescriptors = [...project.storedDescriptors.values()];
+
+    const stringifiedIdents = allDescriptors.map(descriptor => {
+      return structUtils.stringifyIdent(descriptor);
+    });
+
+    const relevantIdents = new Set<IdentHash>();
+    for (const pattern of this.patterns) {
+      if (structUtils.parseDescriptor(pattern).range !== `unknown`)
+        throw new UsageError(`Ranges aren't allowed when using --recursive`);
+
+      for (const stringifiedIdent of micromatch(stringifiedIdents, pattern)) {
+        const ident = structUtils.parseIdent(stringifiedIdent);
+        relevantIdents.add(ident.identHash);
+      }
+    }
+
+    const relevantDescriptors = allDescriptors.filter(descriptor => {
+      return relevantIdents.has(descriptor.identHash);
+    });
+
+    for (const descriptor of relevantDescriptors) {
+      project.storedDescriptors.delete(descriptor.descriptorHash);
+      project.storedResolutions.delete(descriptor.descriptorHash);
+    }
+
+    return await project.installWithNewReport({
+      stdout: this.context.stdout,
+    }, {
+      cache,
+      mode: this.mode,
+    });
+  }
+
+  async executeUpClassic() {
+    const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
+    const {project, workspace} = await Project.find(configuration, this.context.cwd);
+    const cache = await Cache.find(configuration);
+
+    if (!workspace)
+      throw new WorkspaceRequiredError(project.cwd, this.context.cwd);
+
+    await project.restoreInstallState({
+      restoreResolutions: false,
+    });
+
+    const fixed = this.fixed;
+    const interactive = configuration.isInteractive({
+      interactive: this.interactive,
+      stdout: this.context.stdout,
+    });
 
     const modifier = suggestUtils.getModifier(this, project);
 
@@ -93,6 +187,7 @@ export default class UpCommand extends BaseCommand {
 
       // The range has to be static
       const pseudoDescriptor = structUtils.parseDescriptor(pattern);
+      const stringifiedPseudoDescriptor = structUtils.stringifyIdent(pseudoDescriptor);
 
       for (const workspace of project.workspaces) {
         for (const target of [suggestUtils.Target.REGULAR, suggestUtils.Target.DEVELOPMENT]) {
@@ -101,7 +196,12 @@ export default class UpCommand extends BaseCommand {
             return structUtils.stringifyIdent(descriptor);
           });
 
-          for (const stringifiedIdent of micromatch(stringifiedIdents, structUtils.stringifyIdent(pseudoDescriptor))) {
+          // As a special case, we support "*" as a pattern to upgrade all packages
+          const matches = stringifiedPseudoDescriptor === `*`
+            ? stringifiedIdents
+            : micromatch(stringifiedIdents, stringifiedPseudoDescriptor);
+
+          for (const stringifiedIdent of matches) {
             const ident = structUtils.parseIdent(stringifiedIdent);
 
             const existingDescriptor = workspace.manifest[target].get(ident.identHash);
@@ -115,7 +215,7 @@ export default class UpCommand extends BaseCommand {
                 workspace,
                 target,
                 existingDescriptor,
-                await suggestUtils.getSuggestedDescriptors(request, {project, workspace, cache, target, modifier, strategies}),
+                await suggestUtils.getSuggestedDescriptors(request, {project, workspace, cache, target, fixed, modifier, strategies}),
               ] as const;
             }));
 
@@ -130,9 +230,9 @@ export default class UpCommand extends BaseCommand {
     }
 
     if (unreferencedPatterns.length > 1)
-      throw new UsageError(`Patterns ${formatUtils.prettyList(configuration, unreferencedPatterns, FormatType.CODE)} don't match any packages referenced by any workspace`);
+      throw new UsageError(`Patterns ${formatUtils.prettyList(configuration, unreferencedPatterns, formatUtils.Type.CODE)} don't match any packages referenced by any workspace`);
     if (unreferencedPatterns.length > 0)
-      throw new UsageError(`Pattern ${formatUtils.prettyList(configuration, unreferencedPatterns, FormatType.CODE)} doesn't match any packages referenced by any workspace`);
+      throw new UsageError(`Pattern ${formatUtils.prettyList(configuration, unreferencedPatterns, formatUtils.Type.CODE)} doesn't match any packages referenced by any workspace`);
 
     const allSuggestions = await Promise.all(allSuggestionsPromises);
 
@@ -173,11 +273,11 @@ export default class UpCommand extends BaseCommand {
       Workspace,
       suggestUtils.Target,
       Descriptor,
-      Descriptor
+      Descriptor,
     ]> = [];
 
     for (const [workspace, target, /*existing*/, {suggestions}] of allSuggestions) {
-      let selected;
+      let selected: Descriptor;
 
       const nonNullSuggestions = suggestions.filter(suggestion => {
         return suggestion.descriptor !== null;
@@ -190,10 +290,10 @@ export default class UpCommand extends BaseCommand {
         selected = firstSuggestedDescriptor;
       } else {
         askedQuestions = true;
-        ({answer: selected} = await prompt({
+        ({answer: selected} = await prompt<{answer: Descriptor}>({
           type: `select`,
           name: `answer`,
-          message: `Which range to you want to use in ${structUtils.prettyWorkspace(configuration, workspace)} ❯ ${target}?`,
+          message: `Which range do you want to use in ${structUtils.prettyWorkspace(configuration, workspace)} ❯ ${target}?`,
           choices: suggestions.map(({descriptor, name, reason}) => descriptor ? {
             name,
             hint: reason,
@@ -233,7 +333,9 @@ export default class UpCommand extends BaseCommand {
       } else {
         const resolver = configuration.makeResolver();
         const resolveOptions: MinimalResolveOptions = {project, resolver};
-        const bound = resolver.bindDescriptor(current, workspace.anchoredLocator, resolveOptions);
+
+        const normalizedDependency = configuration.normalizeDependency(current);
+        const bound = resolver.bindDescriptor(normalizedDependency, workspace.anchoredLocator, resolveOptions);
 
         project.forgetResolution(bound);
       }
@@ -247,13 +349,11 @@ export default class UpCommand extends BaseCommand {
     if (askedQuestions)
       this.context.stdout.write(`\n`);
 
-    const installReport = await StreamReport.start({
-      configuration,
+    return await project.installWithNewReport({
       stdout: this.context.stdout,
-    }, async report => {
-      await project.install({cache, report});
+    }, {
+      cache,
+      mode: this.mode,
     });
-
-    return installReport.exitCode();
   }
 }

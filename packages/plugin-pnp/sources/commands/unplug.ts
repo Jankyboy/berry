@@ -1,25 +1,16 @@
 import {BaseCommand, WorkspaceRequiredError}                                                                               from '@yarnpkg/cli';
 import {Cache, Configuration, Project, StreamReport, Package, MessageName, formatUtils, LocatorHash, Workspace, miscUtils} from '@yarnpkg/core';
 import {structUtils, semverUtils}                                                                                          from '@yarnpkg/core';
-import {Command, Usage, UsageError}                                                                                        from 'clipanion';
+import {Command, Option, Usage, UsageError}                                                                                from 'clipanion';
 import micromatch                                                                                                          from 'micromatch';
-import semver                                                                                                              from 'semver';
 
 import * as pnpUtils                                                                                                       from '../pnpUtils';
 
 // eslint-disable-next-line arca/no-default-export
 export default class UnplugCommand extends BaseCommand {
-  @Command.Rest()
-  patterns: Array<string> = [];
-
-  @Command.Boolean(`-A,--all`, {description: `Unplug direct dependencies from the entire project`})
-  all: boolean = false;
-
-  @Command.Boolean(`-R,--recursive`, {description: `Unplug both direct and transitive dependencies`})
-  recursive: boolean = false;
-
-  @Command.Boolean(`--json`, {description: `Format the output as an NDJSON stream`})
-  json: boolean = false;
+  static paths = [
+    [`unplug`],
+  ];
 
   static usage: Usage = Command.Usage({
     description: `force the unpacking of a list of packages`,
@@ -58,7 +49,20 @@ export default class UnplugCommand extends BaseCommand {
     ]],
   });
 
-  @Command.Path(`unplug`)
+  all = Option.Boolean(`-A,--all`, false, {
+    description: `Unplug direct dependencies from the entire project`,
+  });
+
+  recursive = Option.Boolean(`-R,--recursive`, false, {
+    description: `Unplug both direct and transitive dependencies`,
+  });
+
+  json = Option.Boolean(`--json`, false, {
+    description: `Format the output as an NDJSON stream`,
+  });
+
+  patterns = Option.Rest();
+
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
     const {project, workspace} = await Project.find(configuration, this.context.cwd);
@@ -80,7 +84,7 @@ export default class UnplugCommand extends BaseCommand {
         ? patternDescriptor
         : structUtils.makeDescriptor(patternDescriptor, `*`);
 
-      if (!semver.validRange(pseudoDescriptor.range))
+      if (!semverUtils.validRange(pseudoDescriptor.range))
         throw new UsageError(`The range of the descriptor patterns must be a valid semver range (${structUtils.prettyDescriptor(configuration, pseudoDescriptor)})`);
 
       return (pkg: Package) => {
@@ -117,6 +121,10 @@ export default class UnplugCommand extends BaseCommand {
         if (seen.has(pkg.locatorHash))
           return;
 
+        const isWorkspace = !!project.tryWorkspaceByLocator(pkg);
+        if (depth > 0 && !this.recursive && isWorkspace)
+          return;
+
         seen.add(pkg.locatorHash);
 
         // Note: We shouldn't skip virtual packages, as
@@ -141,13 +149,8 @@ export default class UnplugCommand extends BaseCommand {
         }
       };
 
-      for (const workspace of roots) {
-        const pkg = project.storedPackages.get(workspace.anchoredLocator.locatorHash);
-        if (!pkg)
-          throw new Error(`Assertion failed: The package should have been registered`);
-
-        traverse(pkg, 0);
-      }
+      for (const workspace of roots)
+        traverse(workspace.anchoredPackage, 0);
 
       return selection;
     };
@@ -177,7 +180,7 @@ export default class UnplugCommand extends BaseCommand {
       return structUtils.stringifyLocator(pkg);
     });
 
-    const report = await StreamReport.start({
+    const unplugReport = await StreamReport.start({
       configuration,
       stdout: this.context.stdout,
       json: this.json,
@@ -197,11 +200,19 @@ export default class UnplugCommand extends BaseCommand {
 
       await project.topLevelWorkspace.persistManifest();
 
-      report.reportSeparator();
-
-      await project.install({cache, report});
+      if (!this.json) {
+        report.reportSeparator();
+      }
     });
 
-    return report.exitCode();
+    if (unplugReport.hasErrors())
+      return unplugReport.exitCode();
+
+    return await project.installWithNewReport({
+      json: this.json,
+      stdout: this.context.stdout,
+    }, {
+      cache,
+    });
   }
 }

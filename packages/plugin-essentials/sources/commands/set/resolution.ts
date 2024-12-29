@@ -1,39 +1,40 @@
-import {BaseCommand, WorkspaceRequiredError}         from '@yarnpkg/cli';
-import {Configuration, Cache, Project, StreamReport} from '@yarnpkg/core';
-import {structUtils}                                 from '@yarnpkg/core';
-import {Command, Usage}                              from 'clipanion';
+import {BaseCommand, WorkspaceRequiredError} from '@yarnpkg/cli';
+import {Configuration, Cache, Project}       from '@yarnpkg/core';
+import {structUtils}                         from '@yarnpkg/core';
+import {Command, Option, Usage}              from 'clipanion';
 
 // eslint-disable-next-line arca/no-default-export
 export default class SetResolutionCommand extends BaseCommand {
-  @Command.String()
-  descriptor!: string;
-
-  @Command.String()
-  resolution!: string;
-
-  @Command.Boolean(`-s,--save`, {description: `Persist the resolution inside the top-level manifest`})
-  save: boolean = false;
+  static paths = [
+    [`set`, `resolution`],
+  ];
 
   static usage: Usage = Command.Usage({
     description: `enforce a package resolution`,
     details: `
       This command updates the resolution table so that \`descriptor\` is resolved by \`resolution\`.
 
-      Note that by default this command only affect the current resolution table - meaning that this "manual override" will disappear if you remove the lockfile, or if the package disappear from the table. If you wish to make the enforced resolution persist whatever happens, add the \`-s,--save\` flag which will also edit the \`resolutions\` field from your top-level manifest.
+      Note that by default this command only affect the current resolution table - meaning that this "manual override" will disappear if you remove the lockfile, or if the package disappear from the table. If you wish to make the enforced resolution persist whatever happens, edit the \`resolutions\` field in your top-level manifest.
 
       Note that no attempt is made at validating that \`resolution\` is a valid resolution entry for \`descriptor\`.
     `,
     examples: [[
-      `Force all instances of lodash@^1.2.3 to resolve to 1.5.0`,
-      `$0 set resolution lodash@^1.2.3 1.5.0`,
+      `Force all instances of lodash@npm:^1.2.3 to resolve to 1.5.0`,
+      `$0 set resolution lodash@npm:^1.2.3 1.5.0`,
     ]],
   });
 
-  @Command.Path(`set`, `resolution`)
+  descriptor = Option.String();
+  resolution = Option.String();
+
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
     const {project, workspace} = await Project.find(configuration, this.context.cwd);
     const cache = await Cache.find(configuration);
+
+    await project.restoreInstallState({
+      restoreResolutions: false,
+    });
 
     if (!workspace)
       throw new WorkspaceRequiredError(project.cwd, this.context.cwd);
@@ -46,13 +47,10 @@ export default class SetResolutionCommand extends BaseCommand {
 
     project.resolutionAliases.set(fromDescriptor.descriptorHash, toDescriptor.descriptorHash);
 
-    const report = await StreamReport.start({
-      configuration,
+    return await project.installWithNewReport({
       stdout: this.context.stdout,
-    }, async (report: StreamReport) => {
-      await project.install({cache, report});
+    }, {
+      cache,
     });
-
-    return report.exitCode();
   }
 }

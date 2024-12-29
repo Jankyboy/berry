@@ -1,18 +1,20 @@
-import {StdinContext}                                    from 'ink';
-import React, {useContext, useEffect, useMemo, useState} from 'react';
+import {useStdin}                            from 'ink';
+import React, {useEffect, useMemo, useState} from 'react';
+import {emitKeypressEvents}                  from 'readline';
 
 export const MinistoreContext = React.createContext<{
-  getAll: () => Map<string, any>,
-  get: (key: string) => any,
-  set: (key: string, value: any) => void,
+  getAll: () => Map<string, any>;
+  get: (key: string) => any;
+  set: (key: string, value: any) => void;
 } | null>(null);
 
 export const Application = ({children}: {children: React.ReactElement}) => {
-  const {setRawMode} = useContext(StdinContext);
+  const {stdin, setRawMode} = useStdin();
 
   useEffect(() => {
     setRawMode && setRawMode(true);
-  }, []);
+    stdin && emitKeypressEvents(stdin);
+  }, [stdin, setRawMode]);
 
   const [data, setData] = useState(new Map());
 

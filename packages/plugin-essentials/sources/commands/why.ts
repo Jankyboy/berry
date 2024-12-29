@@ -2,21 +2,13 @@ import {BaseCommand, WorkspaceRequiredError}                          from '@yar
 import {Configuration, LocatorHash, Package, formatUtils, Descriptor} from '@yarnpkg/core';
 import {IdentHash, Project}                                           from '@yarnpkg/core';
 import {miscUtils, structUtils, treeUtils}                            from '@yarnpkg/core';
-import {Command, Usage}                                               from 'clipanion';
+import {Command, Option, Usage}                                       from 'clipanion';
 
 // eslint-disable-next-line arca/no-default-export
 export default class WhyCommand extends BaseCommand {
-  @Command.String()
-  package!: string;
-
-  @Command.Boolean(`-R,--recursive`, {description: `List, for each workspace, what are all the paths that lead to the dependency`})
-  recursive: boolean = false;
-
-  @Command.Boolean(`--json`, {description: `Format the output as an NDJSON stream`})
-  json: boolean = false;
-
-  @Command.Boolean(`--peers`, {description: `Also print the peer dependencies that match the specified name`})
-  peers: boolean = false;
+  static paths = [
+    [`why`],
+  ];
 
   static usage: Usage = Command.Usage({
     description: `display the reason why a package is needed`,
@@ -31,7 +23,20 @@ export default class WhyCommand extends BaseCommand {
     ]],
   });
 
-  @Command.Path(`why`)
+  recursive = Option.Boolean(`-R,--recursive`, false, {
+    description: `List, for each workspace, what are all the paths that lead to the dependency`,
+  });
+
+  json = Option.Boolean(`--json`, false, {
+    description: `Format the output as an NDJSON stream`,
+  });
+
+  peers = Option.Boolean(`--peers`, false, {
+    description: `Also print the peer dependencies that match the specified name`,
+  });
+
+  package = Option.String();
+
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
     const {project, workspace} = await Project.find(configuration, this.context.cwd);
@@ -146,13 +151,8 @@ function whyRecursive(project: Project, identHash: IdentHash, {configuration, pe
     return depends;
   };
 
-  for (const workspace of sortedWorkspaces) {
-    const pkg = project.storedPackages.get(workspace.anchoredLocator.locatorHash);
-    if (!pkg)
-      throw new Error(`Assertion failed: The package should have been registered`);
-
-    markAllDependents(pkg);
-  }
+  for (const workspace of sortedWorkspaces)
+    markAllDependents(workspace.anchoredPackage);
 
   const printed: Set<LocatorHash> = new Set();
 
@@ -176,17 +176,17 @@ function whyRecursive(project: Project, identHash: IdentHash, {configuration, pe
     const key = structUtils.stringifyLocator(pkg);
     parentChildren[key] = node;
 
+    // We don't want to print the children of our transitive workspace
+    // dependencies, as they will be printed in their own top-level branch
+    if (dependency !== null && project.tryWorkspaceByLocator(pkg))
+      return;
+
     // We don't want to reprint the children for a package that already got
     // printed as part of another branch
     if (printed.has(pkg.locatorHash))
       return;
 
     printed.add(pkg.locatorHash);
-
-    // We don't want to print the children of our transitive workspace
-    // dependencies, as they will be printed in their own top-level branch
-    if (dependency !== null && project.tryWorkspaceByLocator(pkg))
-      return;
 
     for (const dependency of pkg.dependencies.values()) {
       if (!peers && pkg.peerDependencies.has(dependency.identHash))
@@ -204,13 +204,8 @@ function whyRecursive(project: Project, identHash: IdentHash, {configuration, pe
     }
   };
 
-  for (const workspace of sortedWorkspaces) {
-    const pkg = project.storedPackages.get(workspace.anchoredLocator.locatorHash);
-    if (!pkg)
-      throw new Error(`Assertion failed: The package should have been registered`);
-
-    printAllDependents(pkg, rootChildren, null);
-  }
+  for (const workspace of sortedWorkspaces)
+    printAllDependents(workspace.anchoredPackage, rootChildren, null);
 
   return root;
 }

@@ -10,14 +10,14 @@ export enum ActionType {
 }
 
 export type FileAction = {
-  action: ActionType,
-  path: PortablePath,
+  action: ActionType;
+  path: PortablePath;
 };
 
 export type Consensus = {
-  useThirdPerson: boolean,
-  useUpperCase: boolean,
-  useComponent: boolean,
+  useThirdPerson: boolean;
+  useUpperCase: boolean;
+  useComponent: boolean;
 };
 
 export async function findVcsRoot(cwd: PortablePath, {marker}: {marker: Filename}) {
@@ -157,4 +157,3 @@ export function genCommitMessage(consensus: Consensus, actions: Array<[ActionTyp
 
   return `${prefix}${all.join(`, `)}`;
 }
-

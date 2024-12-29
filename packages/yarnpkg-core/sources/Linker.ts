@@ -6,18 +6,18 @@ import {Report}           from './Report';
 import {Locator, Package} from './types';
 
 export type MinimalLinkOptions = {
-  project: Project,
+  project: Project;
 };
 
 export type LinkOptions = MinimalLinkOptions & {
-  report: Report,
+  report: Report;
 };
 
 /**
  * Linkers are the glue between the logical dependency tree and the way it's
  * represented on the filesystem. Their main use is to take the package data
  * and put them on the filesystem in a way that their target environment will
- * understand (for example, in Node's case, it will be to generate a .pnp.js
+ * understand (for example, in Node's case, it will be to generate a .pnp.cjs
  * file).
  *
  * Note that *multiple linkers can coexist in the same dependency tree*. This
@@ -68,6 +68,15 @@ export interface Linker {
    * @param opts The link options.
    */
   findPackageLocator(location: PortablePath, opts: LinkOptions): Promise<Locator | null>;
+
+  /**
+   * Return an arbitrary key.
+   *
+   * This key will be used to save and restore the installer's custom data. You
+   * typically will want to return the installer's name, but you can be fancy
+   * and send a stringified JSON payload that include the cache version, etc.
+   */
+  getCustomDataKey(): string;
 
   /**
    * This function must instantiate an Installer object that describes how to

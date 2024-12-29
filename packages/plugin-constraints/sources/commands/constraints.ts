@@ -1,18 +1,16 @@
-import {BaseCommand}                                                    from '@yarnpkg/cli';
-import {Configuration, IdentHash, Ident, Project, Workspace, miscUtils} from '@yarnpkg/core';
-import {MessageName, StreamReport, AllDependencies}                     from '@yarnpkg/core';
-import {formatUtils, structUtils}                                       from '@yarnpkg/core';
-import {Command, Usage}                                                 from 'clipanion';
-import getPath                                                          from 'lodash/get';
-import setPath                                                          from 'lodash/set';
-import unsetPath                                                        from 'lodash/unset';
+import {BaseCommand}                                                                       from '@yarnpkg/cli';
+import {Configuration, Project, Manifest, treeUtils, miscUtils, StreamReport, MessageName} from '@yarnpkg/core';
+import {formatUtils}                                                                       from '@yarnpkg/core';
+import {Command, Option, Usage}                                                            from 'clipanion';
 
-import {Constraints, EnforcedDependency, EnforcedField}                 from '../Constraints';
+import {ModernEngine}                                                                      from '../ModernEngine';
+import * as constraintUtils                                                                from '../constraintUtils';
 
 // eslint-disable-next-line arca/no-default-export
 export default class ConstraintsCheckCommand extends BaseCommand {
-  @Command.Boolean(`--fix`, {description: `Attempt to automatically fix unambiguous issues, following a multi-pass process`})
-  fix: boolean = false;
+  static paths = [
+    [`constraints`],
+  ];
 
   static usage: Usage = Command.Usage({
     category: `Constraints-related commands`,
@@ -33,193 +31,109 @@ export default class ConstraintsCheckCommand extends BaseCommand {
     ]],
   });
 
-  @Command.Path(`constraints`)
+  fix = Option.Boolean(`--fix`, false, {
+    description: `Attempt to automatically fix unambiguous issues, following a multi-pass process`,
+  });
+
+  json = Option.Boolean(`--json`, false, {
+    description: `Format the output as an NDJSON stream`,
+  });
+
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
     const {project} = await Project.find(configuration, this.context.cwd);
-    const constraints = await Constraints.find(project);
 
-    const report = await StreamReport.start({
-      configuration,
-      stdout: this.context.stdout,
-    }, async report => {
-      let allSaves = new Set<Workspace>();
-      let errors: Array<[MessageName, string]> = [];
+    await project.restoreInstallState();
 
-      for (let t = 0, T = this.fix ? 10 : 1; t < T; ++t) {
-        errors = [];
+    const userConfig = await project.loadUserConfig();
 
-        const toSave = new Set<Workspace>();
-        const result = await constraints.process();
+    let engine: constraintUtils.Engine;
+    if (userConfig?.constraints) {
+      engine = new ModernEngine(project);
+    } else {
+      const {Constraints} = await import(`../Constraints`);
+      engine = await Constraints.find(project);
+    }
 
-        await processDependencyConstraints(toSave, errors, result.enforcedDependencies, {
-          fix: this.fix,
-          configuration,
-        });
+    let root!: treeUtils.TreeRoot;
 
-        await processFieldConstraints(toSave, errors, result.enforcedFields, {
-          fix: this.fix,
-          configuration,
-        });
+    let hasFixableErrors = false;
+    let allFixableErrors = false;
 
-        allSaves = new Set([
-          ...allSaves,
-          ...toSave,
-        ]);
+    for (let t = this.fix ? 10 : 1; t > 0; --t) {
+      const result = await engine.process();
+      if (!result)
+        break;
 
-        // If we didn't apply any change then we can exit the loop
-        if (toSave.size === 0) {
-          break;
+      const {
+        changedWorkspaces,
+        remainingErrors,
+      } = constraintUtils.applyEngineReport(project, result, {
+        fix: this.fix,
+      });
+
+      const updates: Array<Promise<void>> = [];
+      for (const [workspace, manifest] of changedWorkspaces) {
+        const indent = workspace.manifest.indent;
+
+        workspace.manifest = new Manifest();
+        workspace.manifest.indent = indent;
+        workspace.manifest.load(manifest);
+
+        updates.push(workspace.persistManifest());
+      }
+
+      await Promise.all(updates);
+
+      if (changedWorkspaces.size > 0 && t > 1)
+        continue;
+
+      root = constraintUtils.convertReportToRoot(remainingErrors, {configuration});
+
+      hasFixableErrors = false;
+      allFixableErrors = true;
+
+      for (const [, workspaceErrors] of remainingErrors) {
+        for (const error of workspaceErrors) {
+          if (error.fixable) {
+            hasFixableErrors = true;
+          } else {
+            allFixableErrors = false;
+          }
         }
       }
+    }
 
-      // save all modified manifests
-      await Promise.all([...allSaves].map(async workspace => {
-        // Constraints modify the raw manifest so we need to reload it here
-        // otherwise changes are not persisted
-        workspace.manifest.load(workspace.manifest.raw);
-        await workspace.persistManifest();
-      }));
+    if (root.children.length === 0)
+      return 0;
 
+    if (hasFixableErrors) {
+      const message = allFixableErrors
+        ? `Those errors can all be fixed by running ${formatUtils.pretty(configuration, `yarn constraints --fix`, formatUtils.Type.CODE)}`
+        : `Errors prefixed by '⚙' can be fixed by running ${formatUtils.pretty(configuration, `yarn constraints --fix`, formatUtils.Type.CODE)}`;
 
-      // report all outstanding errors
-      for (const [messageName, message] of errors) {
-        report.reportError(messageName, message);
-      }
+      await StreamReport.start({
+        configuration,
+        stdout: this.context.stdout,
+        includeNames: false,
+        includeFooter: false,
+      }, async report => {
+        report.reportInfo(MessageName.UNNAMED, message);
+        report.reportSeparator();
+      });
+    }
+
+    root.children = miscUtils.sortMap(root.children, node => {
+      return node.value![1];
     });
 
-    if (report.hasErrors())
-      return report.exitCode();
+    treeUtils.emitTree(root, {
+      configuration,
+      stdout: this.context.stdout,
+      json: this.json,
+      separators: 1,
+    });
 
-    return 0;
-  }
-}
-
-async function processDependencyConstraints(toSave: Set<Workspace>, errors: Array<[MessageName, string]>, enforcedDependencies: Array<EnforcedDependency>, {configuration, fix}: {configuration: Configuration, fix: boolean}) {
-  const allIdents: Map<IdentHash, Ident> = new Map();
-  const byWorkspaces: Map<Workspace, Map<IdentHash, Map<AllDependencies, Set<string | null>>>> = new Map();
-
-  for (const {workspace, dependencyIdent, dependencyRange, dependencyType} of enforcedDependencies) {
-    let byWorkspacesStore = byWorkspaces.get(workspace);
-    if (typeof byWorkspacesStore === `undefined`)
-      byWorkspaces.set(workspace, byWorkspacesStore = new Map());
-
-    let byIdentStore = byWorkspacesStore.get(dependencyIdent.identHash);
-    if (typeof byIdentStore === `undefined`)
-      byWorkspacesStore.set(dependencyIdent.identHash, byIdentStore = new Map());
-
-    let byDependencyTypeStore = byIdentStore.get(dependencyType);
-    if (typeof byDependencyTypeStore === `undefined`)
-      byIdentStore.set(dependencyType, byDependencyTypeStore = new Set());
-
-    allIdents.set(dependencyIdent.identHash, dependencyIdent);
-    byDependencyTypeStore.add(dependencyRange);
-  }
-
-  for (const [workspace, byWorkspacesStore] of byWorkspaces) {
-    for (const [identHash, byIdentStore] of byWorkspacesStore) {
-      const dependencyIdent = allIdents.get(identHash);
-      if (typeof dependencyIdent === `undefined`)
-        throw new Error(`Assertion failed: The ident should have been registered`);
-
-      for (const [dependencyType, byDependencyTypeStore] of byIdentStore) {
-        const expectedRanges = [...byDependencyTypeStore];
-        if (expectedRanges.length > 2) {
-          errors.push([MessageName.CONSTRAINTS_AMBIGUITY, `${structUtils.prettyWorkspace(configuration, workspace)} must depend on ${structUtils.prettyIdent(configuration, dependencyIdent)} via conflicting ranges ${expectedRanges.slice(0, -1).map(expectedRange => structUtils.prettyRange(configuration, String(expectedRange))).join(`, `)}, and ${structUtils.prettyRange(configuration, String(expectedRanges[expectedRanges.length - 1]))} (in ${dependencyType})`]);
-        } else if (expectedRanges.length > 1) {
-          errors.push([MessageName.CONSTRAINTS_AMBIGUITY, `${structUtils.prettyWorkspace(configuration, workspace)} must depend on ${structUtils.prettyIdent(configuration, dependencyIdent)} via conflicting ranges ${structUtils.prettyRange(configuration, String(expectedRanges[0]))} and ${structUtils.prettyRange(configuration, String(expectedRanges[1]))} (in ${dependencyType})`]);
-        } else {
-          const dependencyDescriptor = workspace.manifest[dependencyType].get(dependencyIdent.identHash);
-          const [expectedRange] = expectedRanges;
-
-          if (expectedRange !== null) {
-            if (!dependencyDescriptor) {
-              if (fix) {
-                workspace.manifest[dependencyType].set(dependencyIdent.identHash, structUtils.makeDescriptor(dependencyIdent, expectedRange));
-                toSave.add(workspace);
-              } else {
-                errors.push([MessageName.CONSTRAINTS_MISSING_DEPENDENCY, `${structUtils.prettyWorkspace(configuration, workspace)} must depend on ${structUtils.prettyIdent(configuration, dependencyIdent)} (via ${structUtils.prettyRange(configuration, expectedRange)}), but doesn't (in ${dependencyType})`]);
-              }
-            } else if (dependencyDescriptor.range !== expectedRange) {
-              if (fix) {
-                workspace.manifest[dependencyType].set(dependencyIdent.identHash, structUtils.makeDescriptor(dependencyIdent, expectedRange));
-                toSave.add(workspace);
-              } else {
-                errors.push([MessageName.CONSTRAINTS_INCOMPATIBLE_DEPENDENCY, `${structUtils.prettyWorkspace(configuration, workspace)} must depend on ${structUtils.prettyIdent(configuration, dependencyIdent)} via ${structUtils.prettyRange(configuration, expectedRange)}, but uses ${structUtils.prettyRange(configuration, dependencyDescriptor.range)} instead (in ${dependencyType})`]);
-              }
-            }
-          } else {
-            if (dependencyDescriptor) {
-              if (fix) {
-                workspace.manifest[dependencyType].delete(dependencyIdent.identHash);
-                toSave.add(workspace);
-              } else {
-                errors.push([MessageName.CONSTRAINTS_EXTRANEOUS_DEPENDENCY, `${structUtils.prettyWorkspace(configuration, workspace)} has an extraneous dependency on ${structUtils.prettyIdent(configuration, dependencyIdent)} (in ${dependencyType})`]);
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-
-async function processFieldConstraints(toSave: Set<Workspace>, errors: Array<[MessageName, string]>, enforcedFields: Array<EnforcedField>, {configuration, fix}: {configuration: Configuration, fix: boolean}) {
-  const byWorkspaces: Map<Workspace, Map<string, Set<string | null>>> = new Map();
-
-  for (const {workspace, fieldPath, fieldValue} of enforcedFields) {
-    const byWorkspacesStore = miscUtils.getMapWithDefault(byWorkspaces, workspace);
-    const byPathStore = miscUtils.getSetWithDefault(byWorkspacesStore, fieldPath);
-
-    byPathStore.add(fieldValue);
-  }
-
-  for (const [workspace, byWorkspacesStore] of byWorkspaces) {
-    for (const [fieldPath, byPathStore] of byWorkspacesStore) {
-      const expectedValues = [...byPathStore];
-      if (expectedValues.length > 2) {
-        errors.push([MessageName.CONSTRAINTS_AMBIGUITY, `${structUtils.prettyWorkspace(configuration, workspace)} must have a field ${formatUtils.pretty(configuration, fieldPath, `cyan`)} set to conflicting values ${expectedValues.slice(0, -1).map(expectedValue => formatUtils.pretty(configuration, String(expectedValue), `magenta`)).join(`, `)}, or ${formatUtils.pretty(configuration, String(expectedValues[expectedValues.length - 1]), `magenta`)}`]);
-      } else if (expectedValues.length > 1) {
-        errors.push([MessageName.CONSTRAINTS_AMBIGUITY, `${structUtils.prettyWorkspace(configuration, workspace)} must have a field ${formatUtils.pretty(configuration, fieldPath, `cyan`)} set to conflicting values ${formatUtils.pretty(configuration, String(expectedValues[0]), `magenta`)} or ${formatUtils.pretty(configuration, String(expectedValues[1]), `magenta`)}`]);
-      } else {
-        const actualValue = getPath(workspace.manifest.raw, fieldPath);
-        const [expectedValue] = expectedValues;
-
-        if (expectedValue !== null) {
-          if (actualValue === undefined) {
-            if (fix) {
-              await setWorkspaceField(workspace, fieldPath, expectedValue);
-              toSave.add(workspace);
-            } else {
-              errors.push([MessageName.CONSTRAINTS_MISSING_FIELD, `${structUtils.prettyWorkspace(configuration, workspace)} must have a field ${formatUtils.pretty(configuration, fieldPath, `cyan`)} set to ${formatUtils.pretty(configuration, String(expectedValue), `magenta`)}, but doesn't`]);
-            }
-          } else if (JSON.stringify(actualValue) !== expectedValue) {
-            if (fix) {
-              await setWorkspaceField(workspace, fieldPath, expectedValue);
-              toSave.add(workspace);
-            } else {
-              errors.push([MessageName.CONSTRAINTS_INCOMPATIBLE_FIELD, `${structUtils.prettyWorkspace(configuration, workspace)} must have a field ${formatUtils.pretty(configuration, fieldPath, `cyan`)} set to ${formatUtils.pretty(configuration, String(expectedValue), `magenta`)}, but is set to ${formatUtils.pretty(configuration, JSON.stringify(actualValue), `magenta`)} instead`]);
-            }
-          }
-        } else {
-          if (actualValue !== undefined && actualValue !== null) {
-            if (fix) {
-              await setWorkspaceField(workspace, fieldPath, null);
-              toSave.add(workspace);
-            } else {
-              errors.push([MessageName.CONSTRAINTS_EXTRANEOUS_FIELD, `${structUtils.prettyWorkspace(configuration, workspace)} has an extraneous field ${formatUtils.pretty(configuration, fieldPath, `cyan`)} set to ${formatUtils.pretty(configuration, String(expectedValue), `magenta`)}`]);
-            }
-          }
-        }
-      }
-    }
-  }
-}
-
-async function setWorkspaceField(workspace: Workspace, fieldPath: string, value: string | null) {
-  if (value === null) {
-    unsetPath(workspace.manifest.raw, fieldPath);
-  } else {
-    setPath(workspace.manifest.raw, fieldPath, JSON.parse(value));
+    return 1;
   }
 }

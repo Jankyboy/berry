@@ -1,19 +1,25 @@
 {
   "name": "@yarnpkg/parsers",
-  "version": "2.2.0",
+  "version": "3.0.2",
   "license": "BSD-2-Clause",
   "main": "./sources/index.ts",
+  "exports": {
+    ".": "./sources/index.ts",
+    "./package.json": "./package.json"
+  },
   "dependencies": {
     "js-yaml": "^3.10.0",
-    "tslib": "^1.13.0"
+    "tslib": "^2.4.0"
   },
   "devDependencies": {
+    "@types/js-yaml": "^3.11.1",
     "pegjs": "^0.10.0"
   },
   "scripts": {
     "grammar:shell": "run pegjs -o sources/grammars/shell.js sources/grammars/shell.pegjs",
     "grammar:resolution": "run pegjs -o sources/grammars/resolution.js sources/grammars/resolution.pegjs",
     "grammar:syml": "run pegjs -o sources/grammars/syml.js sources/grammars/syml.pegjs",
+    "grammar:all": "run grammar:shell & run grammar:resolution & run grammar:syml &",
     "postpack": "rm -rf lib",
     "prepack": "run build:compile \"$(pwd)\"",
     "release": "yarn npm publish",
@@ -21,16 +27,21 @@
   },
   "publishConfig": {
     "main": "./lib/index.js",
-    "typings": "./lib/index.d.ts"
+    "exports": {
+      ".": "./lib/index.js",
+      "./package.json": "./package.json"
+    }
   },
   "files": [
     "/lib/**/*"
   ],
   "repository": {
     "type": "git",
-    "url": "ssh://git@github.com/yarnpkg/berry.git"
+    "url": "ssh://git@github.com/yarnpkg/berry.git",
+    "directory": "packages/yarnpkg-parsers"
   },
   "engines": {
-    "node": ">=10.19.0"
-  }
+    "node": ">=18.12.0"
+  },
+  "stableVersion": "3.0.2"
 }

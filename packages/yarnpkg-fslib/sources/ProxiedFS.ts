@@ -1,7 +1,9 @@
-import {CreateReadStreamOptions, CreateWriteStreamOptions, FakeFS, ExtractHintOptions, WatchFileCallback, WatchFileOptions, StatWatcher} from './FakeFS';
-import {Dirent, SymlinkType}                                                                                                             from './FakeFS';
-import {MkdirOptions, WriteFileOptions, WatchCallback, WatchOptions, Watcher}                                                            from './FakeFS';
-import {FSPath, Filename, Path}                                                                                                          from './path';
+import {Stats, BigIntStats}                                                                                                                                                                 from 'fs';
+
+import {CreateReadStreamOptions, CreateWriteStreamOptions, FakeFS, ExtractHintOptions, WatchFileCallback, WatchFileOptions, StatWatcher, Dir, OpendirOptions, ReaddirOptions, DirentNoPath} from './FakeFS';
+import {Dirent, SymlinkType, StatSyncOptions, StatOptions}                                                                                                                                  from './FakeFS';
+import {MkdirOptions, RmdirOptions, RmOptions, WriteFileOptions, WatchCallback, WatchOptions, Watcher}                                                                                      from './FakeFS';
+import {FSPath, Filename, Path}                                                                                                                                                             from './path';
 
 export abstract class ProxiedFS<P extends Path, IP extends Path> extends FakeFS<P> {
   protected abstract readonly baseFs: FakeFS<IP>;
@@ -28,12 +30,20 @@ export abstract class ProxiedFS<P extends Path, IP extends Path> extends FakeFS<
     return this.mapFromBase(this.baseFs.getRealPath());
   }
 
-  openPromise(p: P, flags: string, mode?: number) {
+  async openPromise(p: P, flags: string, mode?: number) {
     return this.baseFs.openPromise(this.mapToBase(p), flags, mode);
   }
 
   openSync(p: P, flags: string, mode?: number) {
     return this.baseFs.openSync(this.mapToBase(p), flags, mode);
+  }
+
+  async opendirPromise(p: P, opts?: OpendirOptions): Promise<Dir<P>> {
+    return Object.assign(await this.baseFs.opendirPromise(this.mapToBase(p), opts), {path: p});
+  }
+
+  opendirSync(p: P, opts?: OpendirOptions): Dir<P> {
+    return Object.assign(this.baseFs.opendirSync(this.mapToBase(p), opts), {path: p});
   }
 
   async readPromise(fd: number, buffer: Buffer, offset?: number, length?: number, position?: number | null) {
@@ -44,8 +54,8 @@ export abstract class ProxiedFS<P extends Path, IP extends Path> extends FakeFS<
     return this.baseFs.readSync(fd, buffer, offset, length, position);
   }
 
-  writePromise(fd: number, buffer: Buffer, offset?: number, length?: number, position?: number): Promise<number>;
-  writePromise(fd: number, buffer: string, position?: number): Promise<number>;
+  async writePromise(fd: number, buffer: Buffer, offset?: number, length?: number, position?: number): Promise<number>;
+  async writePromise(fd: number, buffer: string, position?: number): Promise<number>;
   async writePromise(fd: number, buffer: Buffer | string, offset?: number, length?: number, position?: number): Promise<number> {
     if (typeof buffer === `string`) {
       return await this.baseFs.writePromise(fd, buffer, offset);
@@ -64,7 +74,7 @@ export abstract class ProxiedFS<P extends Path, IP extends Path> extends FakeFS<
     }
   }
 
-  closePromise(fd: number) {
+  async closePromise(fd: number) {
     return this.baseFs.closePromise(fd);
   }
 
@@ -88,7 +98,7 @@ export abstract class ProxiedFS<P extends Path, IP extends Path> extends FakeFS<
     return this.mapFromBase(this.baseFs.realpathSync(this.mapToBase(p)));
   }
 
-  existsPromise(p: P) {
+  async existsPromise(p: P) {
     return this.baseFs.existsPromise(this.mapToBase(p));
   }
 
@@ -100,27 +110,71 @@ export abstract class ProxiedFS<P extends Path, IP extends Path> extends FakeFS<
     return this.baseFs.accessSync(this.mapToBase(p), mode);
   }
 
-  accessPromise(p: P, mode?: number) {
+  async accessPromise(p: P, mode?: number) {
     return this.baseFs.accessPromise(this.mapToBase(p), mode);
   }
 
-  statPromise(p: P) {
-    return this.baseFs.statPromise(this.mapToBase(p));
+  // https://github.com/DefinitelyTyped/DefinitelyTyped/blob/51d793492d4c2e372b01257668dcd3afc58d7352/types/node/v16/fs.d.ts#L1042-L1059
+  async statPromise(p: P): Promise<Stats>;
+  async statPromise(p: P, opts: (StatOptions & { bigint?: false | undefined }) | undefined): Promise<Stats>;
+  async statPromise(p: P, opts: StatOptions & { bigint: true }): Promise<BigIntStats>;
+  async statPromise(p: P, opts?: StatOptions): Promise<Stats | BigIntStats> {
+    return this.baseFs.statPromise(this.mapToBase(p), opts);
   }
 
-  statSync(p: P) {
-    return this.baseFs.statSync(this.mapToBase(p));
+  // https://github.com/DefinitelyTyped/DefinitelyTyped/blob/51d793492d4c2e372b01257668dcd3afc58d7352/types/node/v16/fs.d.ts#L931-L967
+  statSync(p: P): Stats;
+  statSync(p: P, opts?: StatSyncOptions & {bigint?: false | undefined, throwIfNoEntry: false}): Stats | undefined;
+  statSync(p: P, opts: StatSyncOptions & {bigint: true, throwIfNoEntry: false}): BigIntStats | undefined;
+  statSync(p: P, opts?: StatSyncOptions & {bigint?: false | undefined}): Stats;
+  statSync(p: P, opts: StatSyncOptions & {bigint: true}): BigIntStats;
+  statSync(p: P, opts: StatSyncOptions & {bigint: boolean, throwIfNoEntry?: false | undefined}): Stats | BigIntStats;
+  statSync(p: P, opts?: StatSyncOptions): Stats | BigIntStats | undefined {
+    return this.baseFs.statSync(this.mapToBase(p), opts);
   }
 
-  lstatPromise(p: P) {
-    return this.baseFs.lstatPromise(this.mapToBase(p));
+  async fstatPromise(fd: number): Promise<Stats>;
+  async fstatPromise(fd: number, opts: {bigint: true}): Promise<BigIntStats>;
+  async fstatPromise(fd: number, opts?: {bigint: boolean}): Promise<BigIntStats | Stats>;
+  async fstatPromise(fd: number, opts?: {bigint: boolean}) {
+    return this.baseFs.fstatPromise(fd, opts);
   }
 
-  lstatSync(p: P) {
-    return this.baseFs.lstatSync(this.mapToBase(p));
+  fstatSync(fd: number): Stats;
+  fstatSync(fd: number, opts: {bigint: true}): BigIntStats;
+  fstatSync(fd: number, opts?: {bigint: boolean}): BigIntStats | Stats;
+  fstatSync(fd: number, opts?: {bigint: boolean}) {
+    return this.baseFs.fstatSync(fd, opts);
   }
 
-  chmodPromise(p: P, mask: number) {
+  // https://github.com/DefinitelyTyped/DefinitelyTyped/blob/51d793492d4c2e372b01257668dcd3afc58d7352/types/node/v16/fs.d.ts#L1042-L1059
+  lstatPromise(p: P): Promise<Stats>;
+  lstatPromise(p: P, opts: (StatOptions & { bigint?: false | undefined }) | undefined): Promise<Stats>;
+  lstatPromise(p: P, opts: StatOptions & { bigint: true }): Promise<BigIntStats>;
+  lstatPromise(p: P, opts?: StatOptions): Promise<Stats | BigIntStats> {
+    return this.baseFs.lstatPromise(this.mapToBase(p), opts);
+  }
+
+  // https://github.com/DefinitelyTyped/DefinitelyTyped/blob/51d793492d4c2e372b01257668dcd3afc58d7352/types/node/v16/fs.d.ts#L931-L967
+  lstatSync(p: P): Stats;
+  lstatSync(p: P, opts?: StatSyncOptions & {bigint?: false | undefined, throwIfNoEntry: false}): Stats | undefined;
+  lstatSync(p: P, opts: StatSyncOptions & {bigint: true, throwIfNoEntry: false}): BigIntStats | undefined;
+  lstatSync(p: P, opts?: StatSyncOptions & {bigint?: false | undefined}): Stats;
+  lstatSync(p: P, opts: StatSyncOptions & {bigint: true}): BigIntStats;
+  lstatSync(p: P, opts: StatSyncOptions & { bigint: boolean, throwIfNoEntry?: false | undefined }): Stats | BigIntStats;
+  lstatSync(p: P, opts?: StatSyncOptions): Stats | BigIntStats | undefined {
+    return this.baseFs.lstatSync(this.mapToBase(p), opts);
+  }
+
+  async fchmodPromise(fd: number, mask: number): Promise<void> {
+    return this.baseFs.fchmodPromise(fd, mask);
+  }
+
+  fchmodSync(fd: number, mask: number): void {
+    return this.baseFs.fchmodSync(fd, mask);
+  }
+
+  async chmodPromise(p: P, mask: number) {
     return this.baseFs.chmodPromise(this.mapToBase(p), mask);
   }
 
@@ -128,7 +182,15 @@ export abstract class ProxiedFS<P extends Path, IP extends Path> extends FakeFS<
     return this.baseFs.chmodSync(this.mapToBase(p), mask);
   }
 
-  chownPromise(p: P, uid: number, gid: number) {
+  async fchownPromise(fd: number, uid: number, gid: number): Promise<void> {
+    return this.baseFs.fchownPromise(fd, uid, gid);
+  }
+
+  fchownSync(fd: number, uid: number, gid: number): void {
+    return this.baseFs.fchownSync(fd, uid, gid);
+  }
+
+  async chownPromise(p: P, uid: number, gid: number) {
     return this.baseFs.chownPromise(this.mapToBase(p), uid, gid);
   }
 
@@ -136,7 +198,7 @@ export abstract class ProxiedFS<P extends Path, IP extends Path> extends FakeFS<
     return this.baseFs.chownSync(this.mapToBase(p), uid, gid);
   }
 
-  renamePromise(oldP: P, newP: P) {
+  async renamePromise(oldP: P, newP: P) {
     return this.baseFs.renamePromise(this.mapToBase(oldP), this.mapToBase(newP));
   }
 
@@ -144,7 +206,7 @@ export abstract class ProxiedFS<P extends Path, IP extends Path> extends FakeFS<
     return this.baseFs.renameSync(this.mapToBase(oldP), this.mapToBase(newP));
   }
 
-  copyFilePromise(sourceP: P, destP: P, flags: number = 0) {
+  async copyFilePromise(sourceP: P, destP: P, flags: number = 0) {
     return this.baseFs.copyFilePromise(this.mapToBase(sourceP), this.mapToBase(destP), flags);
   }
 
@@ -152,23 +214,23 @@ export abstract class ProxiedFS<P extends Path, IP extends Path> extends FakeFS<
     return this.baseFs.copyFileSync(this.mapToBase(sourceP), this.mapToBase(destP), flags);
   }
 
-  appendFilePromise(p: FSPath<P>, content: string | Buffer | ArrayBuffer | DataView, opts?: WriteFileOptions) {
+  async appendFilePromise(p: FSPath<P>, content: string | Uint8Array, opts?: WriteFileOptions) {
     return this.baseFs.appendFilePromise(this.fsMapToBase(p), content, opts);
   }
 
-  appendFileSync(p: FSPath<P>, content: string | Buffer | ArrayBuffer | DataView, opts?: WriteFileOptions) {
+  appendFileSync(p: FSPath<P>, content: string | Uint8Array, opts?: WriteFileOptions) {
     return this.baseFs.appendFileSync(this.fsMapToBase(p), content, opts);
   }
 
-  writeFilePromise(p: FSPath<P>, content: string | Buffer | ArrayBuffer | DataView, opts?: WriteFileOptions) {
+  async writeFilePromise(p: FSPath<P>, content: string | NodeJS.ArrayBufferView, opts?: WriteFileOptions) {
     return this.baseFs.writeFilePromise(this.fsMapToBase(p), content, opts);
   }
 
-  writeFileSync(p: FSPath<P>, content: string | Buffer | ArrayBuffer | DataView, opts?: WriteFileOptions) {
+  writeFileSync(p: FSPath<P>, content: string | NodeJS.ArrayBufferView, opts?: WriteFileOptions) {
     return this.baseFs.writeFileSync(this.fsMapToBase(p), content, opts);
   }
 
-  unlinkPromise(p: P) {
+  async unlinkPromise(p: P) {
     return this.baseFs.unlinkPromise(this.mapToBase(p));
   }
 
@@ -176,7 +238,7 @@ export abstract class ProxiedFS<P extends Path, IP extends Path> extends FakeFS<
     return this.baseFs.unlinkSync(this.mapToBase(p));
   }
 
-  utimesPromise(p: P, atime: Date | string | number, mtime: Date | string | number) {
+  async utimesPromise(p: P, atime: Date | string | number, mtime: Date | string | number) {
     return this.baseFs.utimesPromise(this.mapToBase(p), atime, mtime);
   }
 
@@ -184,7 +246,15 @@ export abstract class ProxiedFS<P extends Path, IP extends Path> extends FakeFS<
     return this.baseFs.utimesSync(this.mapToBase(p), atime, mtime);
   }
 
-  mkdirPromise(p: P, opts?: MkdirOptions) {
+  async lutimesPromise(p: P, atime: Date | string | number, mtime: Date | string | number) {
+    return this.baseFs.lutimesPromise(this.mapToBase(p), atime, mtime);
+  }
+
+  lutimesSync(p: P, atime: Date | string | number, mtime: Date | string | number) {
+    return this.baseFs.lutimesSync(this.mapToBase(p), atime, mtime);
+  }
+
+  async mkdirPromise(p: P, opts?: MkdirOptions) {
     return this.baseFs.mkdirPromise(this.mapToBase(p), opts);
   }
 
@@ -192,15 +262,23 @@ export abstract class ProxiedFS<P extends Path, IP extends Path> extends FakeFS<
     return this.baseFs.mkdirSync(this.mapToBase(p), opts);
   }
 
-  rmdirPromise(p: P) {
-    return this.baseFs.rmdirPromise(this.mapToBase(p));
+  async rmdirPromise(p: P, opts?: RmdirOptions) {
+    return this.baseFs.rmdirPromise(this.mapToBase(p), opts);
   }
 
-  rmdirSync(p: P) {
-    return this.baseFs.rmdirSync(this.mapToBase(p));
+  rmdirSync(p: P, opts?: RmdirOptions) {
+    return this.baseFs.rmdirSync(this.mapToBase(p), opts);
   }
 
-  linkPromise(existingP: P, newP: P) {
+  async rmPromise(p: P, opts?: RmOptions) {
+    return this.baseFs.rmPromise(this.mapToBase(p), opts);
+  }
+
+  rmSync(p: P, opts?: RmOptions) {
+    return this.baseFs.rmSync(this.mapToBase(p), opts);
+  }
+
+  async linkPromise(existingP: P, newP: P) {
     return this.baseFs.linkPromise(this.mapToBase(existingP), this.mapToBase(newP));
   }
 
@@ -208,50 +286,70 @@ export abstract class ProxiedFS<P extends Path, IP extends Path> extends FakeFS<
     return this.baseFs.linkSync(this.mapToBase(existingP), this.mapToBase(newP));
   }
 
-  symlinkPromise(target: P, p: P, type?: SymlinkType) {
-    return this.baseFs.symlinkPromise(this.mapToBase(target), this.mapToBase(p), type);
+  async symlinkPromise(target: P, p: P, type?: SymlinkType) {
+    const mappedP = this.mapToBase(p);
+
+    if (this.pathUtils.isAbsolute(target))
+      return this.baseFs.symlinkPromise(this.mapToBase(target), mappedP, type);
+
+    const mappedAbsoluteTarget = this.mapToBase(this.pathUtils.join(this.pathUtils.dirname(p), target));
+    const mappedTarget = this.baseFs.pathUtils.relative(this.baseFs.pathUtils.dirname(mappedP), mappedAbsoluteTarget);
+
+    return this.baseFs.symlinkPromise(mappedTarget, mappedP, type);
   }
 
   symlinkSync(target: P, p: P, type?: SymlinkType) {
-    return this.baseFs.symlinkSync(this.mapToBase(target), this.mapToBase(p), type);
+    const mappedP = this.mapToBase(p);
+
+    if (this.pathUtils.isAbsolute(target))
+      return this.baseFs.symlinkSync(this.mapToBase(target), mappedP, type);
+
+    const mappedAbsoluteTarget = this.mapToBase(this.pathUtils.join(this.pathUtils.dirname(p), target));
+    const mappedTarget = this.baseFs.pathUtils.relative(this.baseFs.pathUtils.dirname(mappedP), mappedAbsoluteTarget);
+
+    return this.baseFs.symlinkSync(mappedTarget, mappedP, type);
   }
 
-  readFilePromise(p: FSPath<P>, encoding: 'utf8'): Promise<string>;
-  readFilePromise(p: FSPath<P>, encoding?: string): Promise<Buffer>;
-  readFilePromise(p: FSPath<P>, encoding?: string) {
-    // This weird condition is required to tell TypeScript that the signatures are proper (otherwise it thinks that only the generic one is covered)
-    if (encoding === `utf8`) {
-      return this.baseFs.readFilePromise(this.fsMapToBase(p), encoding);
-    } else {
-      return this.baseFs.readFilePromise(this.fsMapToBase(p), encoding);
-    }
+  async readFilePromise(p: FSPath<P>, encoding?: null): Promise<Buffer>;
+  async readFilePromise(p: FSPath<P>, encoding: BufferEncoding): Promise<string>;
+  async readFilePromise(p: FSPath<P>, encoding?: BufferEncoding | null): Promise<Buffer | string>;
+  async readFilePromise(p: FSPath<P>, encoding?: BufferEncoding | null) {
+    return this.baseFs.readFilePromise(this.fsMapToBase(p), encoding);
   }
 
-  readFileSync(p: FSPath<P>, encoding: 'utf8'): string;
-  readFileSync(p: FSPath<P>, encoding?: string): Buffer;
-  readFileSync(p: FSPath<P>, encoding?: string) {
-    // This weird condition is required to tell TypeScript that the signatures are proper (otherwise it thinks that only the generic one is covered)
-    if (encoding === `utf8`) {
-      return this.baseFs.readFileSync(this.fsMapToBase(p), encoding);
-    } else  {
-      return this.baseFs.readFileSync(this.fsMapToBase(p), encoding);
-    }
+  readFileSync(p: FSPath<P>, encoding?: null): Buffer;
+  readFileSync(p: FSPath<P>, encoding: BufferEncoding): string;
+  readFileSync(p: FSPath<P>, encoding?: BufferEncoding | null): Buffer | string;
+  readFileSync(p: FSPath<P>, encoding?: BufferEncoding | null) {
+    return this.baseFs.readFileSync(this.fsMapToBase(p), encoding);
   }
 
-  async readdirPromise(p: P): Promise<Array<Filename>>;
-  async readdirPromise(p: P, opts: {withFileTypes: false}): Promise<Array<Filename>>;
-  async readdirPromise(p: P, opts: {withFileTypes: true}): Promise<Array<Dirent>>;
-  async readdirPromise(p: P, opts: {withFileTypes: boolean}): Promise<Array<Filename> | Array<Dirent>>;
-  async readdirPromise(p: P, {withFileTypes}: {withFileTypes?: boolean} = {}): Promise<Array<string> | Array<Dirent>> {
-    return this.baseFs.readdirPromise(this.mapToBase(p), {withFileTypes: withFileTypes as any});
+  readdirPromise(p: P, opts?: null): Promise<Array<Filename>>;
+  readdirPromise(p: P, opts: {recursive?: false, withFileTypes: true}): Promise<Array<DirentNoPath>>;
+  readdirPromise(p: P, opts: {recursive?: false, withFileTypes?: false}): Promise<Array<Filename>>;
+  readdirPromise(p: P, opts: {recursive?: false, withFileTypes: boolean}): Promise<Array<DirentNoPath | Filename>>;
+  readdirPromise(p: P, opts: {recursive: true, withFileTypes: true}): Promise<Array<Dirent<P>>>;
+  readdirPromise(p: P, opts: {recursive: true, withFileTypes?: false}): Promise<Array<P>>;
+  readdirPromise(p: P, opts: {recursive: true, withFileTypes: boolean}): Promise<Array<Dirent<P> | P>>;
+  readdirPromise(p: P, opts: {recursive: boolean, withFileTypes: true}): Promise<Array<Dirent<P> | DirentNoPath>>;
+  readdirPromise(p: P, opts: {recursive: boolean, withFileTypes?: false}): Promise<Array<P>>;
+  readdirPromise(p: P, opts: {recursive: boolean, withFileTypes: boolean}): Promise<Array<Dirent<P> | DirentNoPath | P>>;
+  readdirPromise(p: P, opts?: ReaddirOptions | null): Promise<Array<Dirent<P> | DirentNoPath | P | Filename>> {
+    return this.baseFs.readdirPromise(this.mapToBase(p), opts as any);
   }
 
-  readdirSync(p: P): Array<Filename>;
-  readdirSync(p: P, opts: {withFileTypes: false}): Array<Filename>;
-  readdirSync(p: P, opts: {withFileTypes: true}): Array<Dirent>;
-  readdirSync(p: P, opts: {withFileTypes: boolean}): Array<Filename> | Array<Dirent>;
-  readdirSync(p: P, {withFileTypes}: {withFileTypes?: boolean} = {}): Array<string> | Array<Dirent> {
-    return this.baseFs.readdirSync(this.mapToBase(p), {withFileTypes: withFileTypes as any});
+  readdirSync(p: P, opts?: null): Array<Filename>;
+  readdirSync(p: P, opts: {recursive?: false, withFileTypes: true}): Array<DirentNoPath>;
+  readdirSync(p: P, opts: {recursive?: false, withFileTypes?: false}): Array<Filename>;
+  readdirSync(p: P, opts: {recursive?: false, withFileTypes: boolean}): Array<DirentNoPath | Filename>;
+  readdirSync(p: P, opts: {recursive: true, withFileTypes: true}): Array<Dirent<P>>;
+  readdirSync(p: P, opts: {recursive: true, withFileTypes?: false}): Array<P>;
+  readdirSync(p: P, opts: {recursive: true, withFileTypes: boolean}): Array<Dirent<P> | P>;
+  readdirSync(p: P, opts: {recursive: boolean, withFileTypes: true}): Array<Dirent<P> | DirentNoPath>;
+  readdirSync(p: P, opts: {recursive: boolean, withFileTypes?: false}): Array<P>;
+  readdirSync(p: P, opts: {recursive: boolean, withFileTypes: boolean}): Array<Dirent<P> | DirentNoPath | P>;
+  readdirSync(p: P, opts?: ReaddirOptions | null): Array<Dirent<P> | DirentNoPath | P | Filename> {
+    return this.baseFs.readdirSync(this.mapToBase(p), opts as any);
   }
 
   async readlinkPromise(p: P) {
@@ -268,6 +366,14 @@ export abstract class ProxiedFS<P extends Path, IP extends Path> extends FakeFS<
 
   truncateSync(p: P, len?: number) {
     return this.baseFs.truncateSync(this.mapToBase(p), len);
+  }
+
+  async ftruncatePromise(fd: number, len?: number): Promise<void> {
+    return this.baseFs.ftruncatePromise(fd, len);
+  }
+
+  ftruncateSync(fd: number, len?: number): void {
+    return this.baseFs.ftruncateSync(fd, len);
   }
 
   watch(p: P, cb?: WatchCallback): Watcher;

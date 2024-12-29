@@ -4,8 +4,8 @@ import fs                                               from 'fs';
 import micromatch                                       from 'micromatch';
 
 export type Glob = {
-  isGlobPattern: (pattern: string) => boolean,
-  match: (pattern: string, options: {cwd: PortablePath, baseFs: FakeFS<PortablePath>}) => Promise<Array<string>>,
+  isGlobPattern: (pattern: string) => boolean;
+  match: (pattern: string, options: {cwd: PortablePath, baseFs: FakeFS<PortablePath>}) => Promise<Array<string>>;
 };
 
 export const micromatchOptions: micromatch.Options = {
@@ -44,4 +44,8 @@ export function match(pattern: string, {cwd, baseFs}: {cwd: PortablePath, baseFs
     cwd: npath.fromPortablePath(cwd),
     fs: extendFs(fs, new PosixFS(baseFs)),
   });
+}
+
+export function isBraceExpansion(pattern: string) {
+  return micromatch.scan(pattern, micromatchOptions).isBrace;
 }

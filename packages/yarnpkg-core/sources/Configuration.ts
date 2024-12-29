@@ -1,35 +1,80 @@
-import {DEFAULT_COMPRESSION_LEVEL}                 from '@yarnpkg/fslib';
-import {Filename, PortablePath, npath, ppath, xfs} from '@yarnpkg/fslib';
-import {parseSyml, stringifySyml}                  from '@yarnpkg/parsers';
-import camelcase                                   from 'camelcase';
-import {isCI}                                      from 'ci-info';
-import {UsageError}                                from 'clipanion';
-import pLimit, {Limit}                             from 'p-limit';
-import semver                                      from 'semver';
+import {WebhookEvent}                                                                                            from '@octokit/webhooks-types';
+import {Filename, PortablePath, npath, ppath, xfs}                                                               from '@yarnpkg/fslib';
+import {parseSyml, stringifySyml}                                                                                from '@yarnpkg/parsers';
+import camelcase                                                                                                 from 'camelcase';
+import {isCI, isPR, GITHUB_ACTIONS}                                                                              from 'ci-info';
+import {UsageError}                                                                                              from 'clipanion';
+import {parse as parseDotEnv}                                                                                    from 'dotenv';
+import {isBuiltin}                                                                                               from 'module';
+import pLimit, {Limit}                                                                                           from 'p-limit';
+import {PassThrough, Writable}                                                                                   from 'stream';
+import {WriteStream}                                                                                             from 'tty';
 
-import {PassThrough, Writable}                     from 'stream';
+import {CorePlugin}                                                                                              from './CorePlugin';
+import {Manifest, PeerDependencyMeta}                                                                            from './Manifest';
+import {MultiFetcher}                                                                                            from './MultiFetcher';
+import {MultiResolver}                                                                                           from './MultiResolver';
+import {Plugin, Hooks, PluginMeta}                                                                               from './Plugin';
+import {Report}                                                                                                  from './Report';
+import {TelemetryManager}                                                                                        from './TelemetryManager';
+import {VirtualFetcher}                                                                                          from './VirtualFetcher';
+import {VirtualResolver}                                                                                         from './VirtualResolver';
+import {WorkspaceFetcher}                                                                                        from './WorkspaceFetcher';
+import {WorkspaceResolver}                                                                                       from './WorkspaceResolver';
+import * as configUtils                                                                                          from './configUtils';
+import * as folderUtils                                                                                          from './folderUtils';
+import * as formatUtils                                                                                          from './formatUtils';
+import * as hashUtils                                                                                            from './hashUtils';
+import * as httpUtils                                                                                            from './httpUtils';
+import * as miscUtils                                                                                            from './miscUtils';
+import * as nodeUtils                                                                                            from './nodeUtils';
+import * as semverUtils                                                                                          from './semverUtils';
+import * as structUtils                                                                                          from './structUtils';
+import {IdentHash, Package, Descriptor, PackageExtension, PackageExtensionType, PackageExtensionStatus, Locator} from './types';
 
-import {CorePlugin}                                from './CorePlugin';
-import {Manifest}                                  from './Manifest';
-import {MultiFetcher}                              from './MultiFetcher';
-import {MultiResolver}                             from './MultiResolver';
-import {Plugin, Hooks}                             from './Plugin';
-import {ProtocolResolver}                          from './ProtocolResolver';
-import {Report}                                    from './Report';
-import {TelemetryManager}                          from './TelemetryManager';
-import {VirtualFetcher}                            from './VirtualFetcher';
-import {VirtualResolver}                           from './VirtualResolver';
-import {WorkspaceFetcher}                          from './WorkspaceFetcher';
-import {WorkspaceResolver}                         from './WorkspaceResolver';
-import * as folderUtils                            from './folderUtils';
-import * as formatUtils                            from './formatUtils';
-import * as miscUtils                              from './miscUtils';
-import * as nodeUtils                              from './nodeUtils';
-import * as semverUtils                            from './semverUtils';
-import * as structUtils                            from './structUtils';
-import {IdentHash, Package, Descriptor}            from './types';
+const isPublicRepository = (function () {
+  if (!GITHUB_ACTIONS || !process.env.GITHUB_EVENT_PATH)
+    return false;
+
+  const githubEventPath = npath.toPortablePath(process.env.GITHUB_EVENT_PATH);
+
+  let data: WebhookEvent;
+  try {
+    data = xfs.readJsonSync(githubEventPath) as WebhookEvent;
+  } catch {
+    return false;
+  }
+
+  if (!(`repository` in data) || !data.repository)
+    return false;
+
+  if (data.repository.private ?? true)
+    return false;
+
+  return true;
+})();
+
+export const LEGACY_PLUGINS = new Set([
+  `@yarnpkg/plugin-constraints`,
+  `@yarnpkg/plugin-exec`,
+  `@yarnpkg/plugin-interactive-tools`,
+  `@yarnpkg/plugin-stage`,
+  `@yarnpkg/plugin-typescript`,
+  `@yarnpkg/plugin-version`,
+  `@yarnpkg/plugin-workspace-tools`,
+]);
 
 const IGNORED_ENV_VARIABLES = new Set([
+  // Used by our test environment
+  `isTestEnv`,
+  `injectNpmUser`,
+  `injectNpmPassword`,
+  `injectNpm2FaToken`,
+  `zipDataEpilogue`,
+  `cacheCheckpointOverride`,
+  `cacheVersionOverride`,
+  `lockfileVersionOverride`,
+
   // "binFolder" is the magic location where the parent process stored the
   // current binaries; not an actual configuration settings
   `binFolder`,
@@ -53,11 +98,24 @@ const IGNORED_ENV_VARIABLES = new Set([
   // "wrapOutput" was a variable used to indicate nested "yarn run" processes
   // back in Yarn 1.
   `wrapOutput`,
+
+  // "YARN_HOME" and "YARN_CONF_DIR" may be present as part of the unrelated "Apache Hadoop YARN" software project.
+  // https://hadoop.apache.org/docs/r0.23.11/hadoop-project-dist/hadoop-common/SingleCluster.html
+  `home`,
+  `confDir`,
+
+  // "YARN_REGISTRY", read by yarn 1.x, prevents yarn 2+ installations if set
+  `registry`,
+
+  // "ignoreCwd" was previously used to skip extra chdir calls in Yarn Modern when `--cwd` was used.
+  // It needs to be ignored because it's set by the parent process which could be anything.
+  `ignoreCwd`,
 ]);
+
+export const TAG_REGEXP = /^(?!v)[a-z0-9._-]+$/i;
 
 export const ENVIRONMENT_PREFIX = `yarn_`;
 export const DEFAULT_RC_FILENAME = `.yarnrc.yml` as Filename;
-export const DEFAULT_LOCK_FILENAME = `yarn.lock` as Filename;
 export const SECRET = `********`;
 
 export enum SettingsType {
@@ -73,29 +131,40 @@ export enum SettingsType {
   MAP = `MAP`,
 }
 
+export type SupportedArchitectures = {
+  os: Array<string> | null;
+  cpu: Array<string> | null;
+  libc: Array<string> | null;
+};
+
+/**
+ * @deprecated Use {@link formatUtils.Type}
+ */
 export type FormatType = formatUtils.Type;
+/**
+ * @deprecated Use {@link formatUtils.Type}
+ */
 export const FormatType = formatUtils.Type;
 
 export type BaseSettingsDefinition<T extends SettingsType = SettingsType> = {
-  description: string,
-  type: T,
-  isArray?: boolean,
-};
+  description: string;
+  type: T;
+} & ({isArray?: false} | {isArray: true, concatenateValues?: boolean});
 
 export type ShapeSettingsDefinition = BaseSettingsDefinition<SettingsType.SHAPE> & {
-  properties: {[propertyName: string]: SettingsDefinition},
+  properties: {[propertyName: string]: SettingsDefinition};
 };
 
 export type MapSettingsDefinition = BaseSettingsDefinition<SettingsType.MAP> & {
-  valueDefinition: SettingsDefinitionNoDefault,
-  normalizeKeys?: (key: string) => string,
+  valueDefinition: SettingsDefinitionNoDefault;
+  normalizeKeys?: (key: string) => string;
 };
 
 export type SimpleSettingsDefinition = BaseSettingsDefinition<Exclude<SettingsType, SettingsType.SHAPE | SettingsType.MAP>> & {
-  default: any,
-  defaultText?: any,
-  isNullable?: boolean,
-  values?: Array<any>,
+  default: any;
+  defaultText?: any;
+  isNullable?: boolean;
+  values?: Array<any>;
 };
 
 export type SettingsDefinitionNoDefault =
@@ -109,15 +178,19 @@ export type SettingsDefinition =
   | SimpleSettingsDefinition;
 
 export type PluginConfiguration = {
-  modules: Map<string, any>,
-  plugins: Set<string>,
+  modules: Map<string, any>;
+  plugins: Set<string>;
 };
+
+export enum WindowsLinkType {
+  JUNCTIONS = `junctions`,
+  SYMLINKS = `symlinks`,
+}
 
 // General rules:
 //
 // - filenames that don't accept actual paths must end with the "Filename" suffix
 //   prefer to use absolute paths instead, since they are automatically resolved
-//   ex: lockfileFilename
 //
 // - folders must end with the "Folder" suffix
 //   ex: cacheFolder, pnpVirtualFolder
@@ -149,20 +222,10 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
     type: SettingsType.BOOLEAN,
     default: false,
   },
-  ignoreCwd: {
-    description: `If true, the \`--cwd\` flag will be ignored`,
-    type: SettingsType.BOOLEAN,
-    default: false,
-  },
 
   // Settings related to the package manager internal names
-  cacheKeyOverride: {
-    description: `A global cache key override; used only for test purposes`,
-    type: SettingsType.STRING,
-    default: null,
-  },
   globalFolder: {
-    description: `Folder where are stored the system-wide settings`,
+    description: `Folder where all system-global files are stored`,
     type: SettingsType.ABSOLUTE_PATH,
     default: folderUtils.getDefaultGlobalFolder(),
   },
@@ -175,22 +238,12 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
     description: `Zip files compression level, from 0 to 9 or mixed (a variant of 9, which stores some files uncompressed, when compression doesn't yield good results)`,
     type: SettingsType.NUMBER,
     values: [`mixed`, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    default: DEFAULT_COMPRESSION_LEVEL,
+    default: 0,
   },
   virtualFolder: {
-    description: `Folder where the virtual packages (cf doc) will be mapped on the disk (must be named $$virtual)`,
+    description: `Folder where the virtual packages (cf doc) will be mapped on the disk (must be named __virtual__)`,
     type: SettingsType.ABSOLUTE_PATH,
-    default: `./.yarn/$$virtual`,
-  },
-  bstatePath: {
-    description: `Path of the file where the current state of the built packages must be stored`,
-    type: SettingsType.ABSOLUTE_PATH,
-    default: `./.yarn/build-state.yml`,
-  },
-  lockfileFilename: {
-    description: `Name of the files where the Yarn dependency tree entries must be stored`,
-    type: SettingsType.STRING,
-    default: DEFAULT_LOCK_FILENAME,
+    default: `./.yarn/__virtual__`,
   },
   installStatePath: {
     description: `Path of the file where the install state will be persisted`,
@@ -211,12 +264,13 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
   enableGlobalCache: {
     description: `If true, the system-wide cache folder will be used regardless of \`cache-folder\``,
     type: SettingsType.BOOLEAN,
-    default: false,
+    default: true,
   },
-  enableAbsoluteVirtuals: {
-    description: `If true, the virtual symlinks will use absolute paths if required [non portable!!]`,
-    type: SettingsType.BOOLEAN,
-    default: false,
+  cacheMigrationMode: {
+    description: `Defines the conditions under which Yarn upgrades should cause the cache archives to be regenerated.`,
+    type: SettingsType.STRING,
+    values: [`always`, `match-spec`, `required-only`],
+    default: `always`,
   },
 
   // Settings related to the output style
@@ -238,10 +292,15 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
     default: isCI,
     defaultText: `<dynamic>`,
   },
+  enableMessageNames: {
+    description: `If true, the CLI will prefix most messages with codes suitable for search engines`,
+    type: SettingsType.BOOLEAN,
+    default: true,
+  },
   enableProgressBars: {
     description: `If true, the CLI is allowed to show a progress bar for long-running events`,
     type: SettingsType.BOOLEAN,
-    default: !isCI && process.stdout.isTTY && process.stdout.columns > 22,
+    default: !isCI,
     defaultText: `<dynamic>`,
   },
   enableTimers: {
@@ -249,11 +308,15 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
     type: SettingsType.BOOLEAN,
     default: true,
   },
-  preferAggregateCacheInfo: {
-    description: `If true, the CLI will only print a one-line report of any cache changes`,
+  enableTips: {
+    description: `If true, installs will print a helpful message every day of the week`,
     type: SettingsType.BOOLEAN,
-    default: isCI,
+    default: !isCI,
+    defaultText: `<dynamic>`,
   },
+  /**
+   * @internal Prefer using `Configuration#isInteractive`.
+   */
   preferInteractive: {
     description: `If true, the CLI will automatically use the interactive mode when called from a TTY`,
     type: SettingsType.BOOLEAN,
@@ -287,6 +350,33 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
     type: SettingsType.BOOLEAN,
     default: true,
   },
+  supportedArchitectures: {
+    description: `Architectures that Yarn will fetch and inject into the resolver`,
+    type: SettingsType.SHAPE,
+    properties: {
+      os: {
+        description: `Array of supported process.platform strings, or null to target them all`,
+        type: SettingsType.STRING,
+        isArray: true,
+        isNullable: true,
+        default: [`current`],
+      },
+      cpu: {
+        description: `Array of supported process.arch strings, or null to target them all`,
+        type: SettingsType.STRING,
+        isArray: true,
+        isNullable: true,
+        default: [`current`],
+      },
+      libc: {
+        description: `Array of supported libc libraries, or null to target them all`,
+        type: SettingsType.STRING,
+        isArray: true,
+        isNullable: true,
+        default: [`current`],
+      },
+    },
+  },
 
   // Settings related to network access
   enableMirror: {
@@ -295,9 +385,14 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
     default: true,
   },
   enableNetwork: {
-    description: `If false, the package manager will refuse to use the network if required to`,
+    description: `If false, Yarn will refuse to use the network if required to`,
     type: SettingsType.BOOLEAN,
     default: true,
+  },
+  enableOfflineMode: {
+    description: `If true, Yarn will attempt to retrieve files and metadata from the global cache rather than the network`,
+    type: SettingsType.BOOLEAN,
+    default: false,
   },
   httpProxy: {
     description: `URL of the http proxy that must be used for outgoing http requests`,
@@ -328,14 +423,116 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
   networkConcurrency: {
     description: `Maximal number of concurrent requests`,
     type: SettingsType.NUMBER,
-    default: Infinity,
+    default: 50,
+  },
+  taskPoolConcurrency: {
+    description: `Maximal amount of concurrent heavy task processing`,
+    type: SettingsType.NUMBER,
+    default: nodeUtils.availableParallelism(),
+  },
+  taskPoolMode: {
+    description: `Execution strategy for heavy tasks`,
+    type: SettingsType.STRING,
+    values: [`async`, `workers`],
+    default: `workers`,
+  },
+  networkSettings: {
+    description: `Network settings per hostname (glob patterns are supported)`,
+    type: SettingsType.MAP,
+    valueDefinition: {
+      description: ``,
+      type: SettingsType.SHAPE,
+      properties: {
+        httpsCaFilePath: {
+          description: `Path to file containing one or multiple Certificate Authority signing certificates`,
+          type: SettingsType.ABSOLUTE_PATH,
+          default: null,
+        },
+        enableNetwork: {
+          description: `If false, the package manager will refuse to use the network if required to`,
+          type: SettingsType.BOOLEAN,
+          default: null,
+        },
+        httpProxy: {
+          description: `URL of the http proxy that must be used for outgoing http requests`,
+          type: SettingsType.STRING,
+          default: null,
+        },
+        httpsProxy: {
+          description: `URL of the http proxy that must be used for outgoing https requests`,
+          type: SettingsType.STRING,
+          default: null,
+        },
+        httpsKeyFilePath: {
+          description: `Path to file containing private key in PEM format`,
+          type: SettingsType.ABSOLUTE_PATH,
+          default: null,
+        },
+        httpsCertFilePath: {
+          description: `Path to file containing certificate chain in PEM format`,
+          type: SettingsType.ABSOLUTE_PATH,
+          default: null,
+        },
+      },
+    },
+  },
+  httpsCaFilePath: {
+    description: `A path to a file containing one or multiple Certificate Authority signing certificates`,
+    type: SettingsType.ABSOLUTE_PATH,
+    default: null,
+  },
+  httpsKeyFilePath: {
+    description: `Path to file containing private key in PEM format`,
+    type: SettingsType.ABSOLUTE_PATH,
+    default: null,
+  },
+  httpsCertFilePath: {
+    description: `Path to file containing certificate chain in PEM format`,
+    type: SettingsType.ABSOLUTE_PATH,
+    default: null,
+  },
+  enableStrictSsl: {
+    description: `If false, SSL certificate errors will be ignored`,
+    type: SettingsType.BOOLEAN,
+    default: true,
+  },
+
+  logFilters: {
+    description: `Overrides for log levels`,
+    type: SettingsType.SHAPE,
+    isArray: true,
+    concatenateValues: true,
+    properties: {
+      code: {
+        description: `Code of the messages covered by this override`,
+        type: SettingsType.STRING,
+        default: undefined,
+      },
+      text: {
+        description: `Code of the texts covered by this override`,
+        type: SettingsType.STRING,
+        default: undefined,
+      },
+      pattern: {
+        description: `Code of the patterns covered by this override`,
+        type: SettingsType.STRING,
+        default: undefined,
+      },
+      level: {
+        description: `Log level override, set to null to remove override`,
+        type: SettingsType.STRING,
+        values: Object.values(formatUtils.LogLevel),
+        isNullable: true,
+        default: undefined,
+      },
+    },
   },
 
   // Settings related to telemetry
   enableTelemetry: {
     description: `If true, telemetry will be periodically sent, following the rules in https://yarnpkg.com/advanced/telemetry`,
     type: SettingsType.BOOLEAN,
-    default: !isCI,
+    default: true,
   },
   telemetryInterval: {
     description: `Minimal amount of time between two telemetry uploads, in days`,
@@ -349,8 +546,19 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
   },
 
   // Settings related to security
+  enableHardenedMode: {
+    description: `If true, automatically enable --check-resolutions --refresh-lockfile on installs`,
+    type: SettingsType.BOOLEAN,
+    default: isPR && isPublicRepository,
+    defaultText: `<true on public PRs>`,
+  },
   enableScripts: {
     description: `If true, packages are allowed to have install scripts by default`,
+    type: SettingsType.BOOLEAN,
+    default: true,
+  },
+  enableStrictSettings: {
+    description: `If true, unknown settings will cause Yarn to abort`,
     type: SettingsType.BOOLEAN,
     default: true,
   },
@@ -359,10 +567,23 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
     type: SettingsType.BOOLEAN,
     default: false,
   },
+  enableCacheClean: {
+    description: `If false, disallows the \`cache clean\` command`,
+    type: SettingsType.BOOLEAN,
+    default: true,
+  },
   checksumBehavior: {
     description: `Enumeration defining what to do when a checksum doesn't match expectations`,
     type: SettingsType.STRING,
     default: `throw`,
+  },
+
+  // Miscellaneous settings
+  injectEnvironmentFiles: {
+    description: `List of all the environment files that Yarn should inject inside the process when it starts`,
+    type: SettingsType.ABSOLUTE_PATH,
+    default: [`.env.yarn?`],
+    isArray: true,
   },
 
   // Package patching - to fix incorrect definitions
@@ -370,42 +591,68 @@ export const coreDefinitions: {[coreSettingName: string]: SettingsDefinition} = 
     description: `Map of package corrections to apply on the dependency tree`,
     type: SettingsType.MAP,
     valueDefinition: {
-      description: ``,
-      type: SettingsType.ANY,
+      description: `The extension that will be applied to any package whose version matches the specified range`,
+      type: SettingsType.SHAPE,
+      properties: {
+        dependencies: {
+          description: `The set of dependencies that must be made available to the current package in order for it to work properly`,
+          type: SettingsType.MAP,
+          valueDefinition: {
+            description: `A range`,
+            type: SettingsType.STRING,
+          },
+        },
+        peerDependencies: {
+          description: `Inherited dependencies - the consumer of the package will be tasked to provide them`,
+          type: SettingsType.MAP,
+          valueDefinition: {
+            description: `A semver range`,
+            type: SettingsType.STRING,
+          },
+        },
+        peerDependenciesMeta: {
+          description: `Extra information related to the dependencies listed in the peerDependencies field`,
+          type: SettingsType.MAP,
+          valueDefinition: {
+            description: `The peerDependency meta`,
+            type: SettingsType.SHAPE,
+            properties: {
+              optional: {
+                description: `If true, the selected peer dependency will be marked as optional by the package manager and the consumer omitting it won't be reported as an error`,
+                type: SettingsType.BOOLEAN,
+                default: false,
+              },
+            },
+          },
+        },
+      },
     },
   },
 };
 
-export interface MapConfigurationValue<T extends object> {
-  get<K extends keyof T>(key: K): T[K];
-}
-
 export interface ConfigurationValueMap {
   lastUpdateCheck: string | null;
 
-  yarnPath: PortablePath;
+  yarnPath: PortablePath | null;
   ignorePath: boolean;
-  ignoreCwd: boolean;
 
-  cacheKeyOverride: string | null;
   globalFolder: PortablePath;
   cacheFolder: PortablePath;
   compressionLevel: `mixed` | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
   virtualFolder: PortablePath;
-  bstatePath: PortablePath;
-  lockfileFilename: Filename;
   installStatePath: PortablePath;
   immutablePatterns: Array<string>;
   rcFilename: Filename;
   enableGlobalCache: boolean;
-  enableAbsoluteVirtuals: boolean;
+  cacheMigrationMode: `always` | `match-spec` | `required-only`;
 
   enableColors: boolean;
   enableHyperlinks: boolean;
   enableInlineBuilds: boolean;
+  enableMessageNames: boolean;
   enableProgressBars: boolean;
   enableTimers: boolean;
-  preferAggregateCacheInfo: boolean;
+  enableTips: boolean;
   preferInteractive: boolean;
   preferTruncatedLines: boolean;
   progressBarStyle: string | undefined;
@@ -413,15 +660,33 @@ export interface ConfigurationValueMap {
   defaultLanguageName: string;
   defaultProtocol: string;
   enableTransparentWorkspaces: boolean;
+  supportedArchitectures: miscUtils.ToMapValue<SupportedArchitectures>;
 
   enableMirror: boolean;
   enableNetwork: boolean;
-  httpProxy: string;
-  httpsProxy: string;
+  enableOfflineMode: boolean;
+  httpProxy: string | null;
+  httpsProxy: string | null;
   unsafeHttpWhitelist: Array<string>;
   httpTimeout: number;
   httpRetry: number;
   networkConcurrency: number;
+  networkSettings: Map<string, miscUtils.ToMapValue<{
+    httpsCaFilePath: PortablePath | null;
+    enableNetwork: boolean | null;
+    httpProxy: string | null;
+    httpsProxy: string | null;
+    httpsKeyFilePath: PortablePath | null;
+    httpsCertFilePath: PortablePath | null;
+  }>>;
+  httpsCaFilePath: PortablePath | null;
+  httpsKeyFilePath: PortablePath | null;
+  httpsCertFilePath: PortablePath | null;
+  enableStrictSsl: boolean;
+  taskPoolConcurrency: number;
+  taskPoolMode: string;
+
+  logFilters: Array<miscUtils.ToMapValue<{code?: string, text?: string, pattern?: string, level?: formatUtils.LogLevel | null}>>;
 
   // Settings related to telemetry
   enableTelemetry: boolean;
@@ -429,13 +694,26 @@ export interface ConfigurationValueMap {
   telemetryUserId: string | null;
 
   // Settings related to security
+  enableHardenedMode: boolean;
   enableScripts: boolean;
+  enableStrictSettings: boolean;
   enableImmutableCache: boolean;
   checksumBehavior: string;
 
+  // Miscellaneous settings
+  injectEnvironmentFiles: Array<PortablePath>;
+
   // Package patching - to fix incorrect definitions
-  packageExtensions: Map<string, any>;
+  packageExtensions: Map<string, miscUtils.ToMapValue<{
+    dependencies?: Map<string, string>;
+    peerDependencies?: Map<string, string>;
+    peerDependenciesMeta?: Map<string, miscUtils.ToMapValue<{optional?: boolean}>>;
+  }>>;
 }
+
+export type PackageExtensionData = miscUtils.MapValueToObjectValue<miscUtils.MapValue<ConfigurationValueMap['packageExtensions']>>;
+
+export type PackageExtensions = Map<IdentHash, Array<[string, Array<PackageExtension>]>>;
 
 type SimpleDefinitionForType<T> = SimpleSettingsDefinition & {
   type:
@@ -449,7 +727,7 @@ type SimpleDefinitionForType<T> = SimpleSettingsDefinition & {
 
 type DefinitionForTypeHelper<T> = T extends Map<string, infer U>
   ? (MapSettingsDefinition & {valueDefinition: Omit<DefinitionForType<U>, 'default'>})
-  : T extends MapConfigurationValue<infer U>
+  : T extends miscUtils.ToMapValue<infer U>
     ? (ShapeSettingsDefinition & {properties: ConfigurationDefinitionMap<U>})
     : SimpleDefinitionForType<T>;
 
@@ -465,32 +743,15 @@ type DefinitionForType<T> = T extends Array<infer U>
 // against what's actually put in the `values` field.
 export type ConfigurationDefinitionMap<V = ConfigurationValueMap> = {
   [K in keyof V]: DefinitionForType<V[K]>;
-}
+};
 
-function parseBoolean(value: unknown) {
-  switch (value) {
-    case `true`:
-    case `1`:
-    case 1:
-    case true: {
-      return true;
-    } break;
+// There are two types of values
+// 1. ResolvedRcFile from `configUtils.resolveRcFiles`
+// 2. objects passed directly via `configuration.useWithSource` or `configuration.use`
+function parseValue(configuration: Configuration, path: string, valueBase: unknown, definition: SettingsDefinition, folder: PortablePath) {
+  const value = configUtils.getValue(valueBase);
 
-    case `false`:
-    case `0`:
-    case 0:
-    case false: {
-      return false;
-    } break;
-
-    default: {
-      throw new Error(`Couldn't parse "${value}" as a boolean`);
-    } break;
-  }
-}
-
-function parseValue(configuration: Configuration, path: string, value: unknown, definition: SettingsDefinition, folder: PortablePath) {
-  if (definition.isArray) {
+  if (definition.isArray || (definition.type === SettingsType.ANY && Array.isArray(value))) {
     if (!Array.isArray(value)) {
       return String(value).split(/,/).map(segment => {
         return parseSingleValue(configuration, path, segment, definition, folder);
@@ -502,19 +763,21 @@ function parseValue(configuration: Configuration, path: string, value: unknown, 
     if (Array.isArray(value)) {
       throw new Error(`Non-array configuration settings "${path}" cannot be an array`);
     } else {
-      return parseSingleValue(configuration, path, value, definition, folder);
+      return parseSingleValue(configuration, path, valueBase, definition, folder);
     }
   }
 }
 
-function parseSingleValue(configuration: Configuration, path: string, value: unknown, definition: SettingsDefinition, folder: PortablePath) {
+function parseSingleValue(configuration: Configuration, path: string, valueBase: unknown, definition: SettingsDefinition, folder: PortablePath) {
+  const value = configUtils.getValue(valueBase);
+
   switch (definition.type) {
     case SettingsType.ANY:
-      return value;
+      return configUtils.getValueByTree(value);
     case SettingsType.SHAPE:
-      return parseShape(configuration, path, value, definition, folder);
+      return parseShape(configuration, path, valueBase, definition, folder);
     case SettingsType.MAP:
-      return parseMap(configuration, path, value, definition, folder);
+      return parseMap(configuration, path, valueBase, definition, folder);
   }
 
   if (value === null && !definition.isNullable && definition.default !== null)
@@ -524,25 +787,35 @@ function parseSingleValue(configuration: Configuration, path: string, value: unk
     return value;
 
   const interpretValue = () => {
-    if (definition.type === SettingsType.BOOLEAN)
-      return parseBoolean(value);
+    if (definition.type === SettingsType.BOOLEAN && typeof value !== `string`)
+      return miscUtils.parseBoolean(value);
 
     if (typeof value !== `string`)
-      throw new Error(`Expected value (${value}) to be a string`);
+      throw new Error(`Expected configuration setting "${path}" to be a string, got ${typeof value}`);
 
     const valueWithReplacedVariables = miscUtils.replaceEnvVariables(value, {
-      env: process.env,
+      env: configuration.env,
     });
 
     switch (definition.type) {
-      case SettingsType.ABSOLUTE_PATH:
-        return ppath.resolve(folder, npath.toPortablePath(valueWithReplacedVariables));
+      case SettingsType.ABSOLUTE_PATH:{
+        let cwd = folder;
+
+        // singleValue's source should be a single file path, if it exists
+        const source = configUtils.getSource(valueBase);
+        if (source && source[0] !== `<`)
+          cwd = ppath.dirname(source as PortablePath);
+
+        return ppath.resolve(cwd, npath.toPortablePath(valueWithReplacedVariables));
+      }
       case SettingsType.LOCATOR_LOOSE:
         return structUtils.parseLocator(valueWithReplacedVariables, false);
       case SettingsType.NUMBER:
         return parseInt(valueWithReplacedVariables);
       case SettingsType.LOCATOR:
         return structUtils.parseLocator(valueWithReplacedVariables);
+      case SettingsType.BOOLEAN:
+        return miscUtils.parseBoolean(valueWithReplacedVariables);
       default:
         return valueWithReplacedVariables;
     }
@@ -556,11 +829,15 @@ function parseSingleValue(configuration: Configuration, path: string, value: unk
   return interpreted;
 }
 
-function parseShape(configuration: Configuration, path: string, value: unknown, definition: ShapeSettingsDefinition, folder: PortablePath) {
+function parseShape(configuration: Configuration, path: string, valueBase: unknown, definition: ShapeSettingsDefinition, folder: PortablePath) {
+  const value = configUtils.getValue(valueBase);
+
   if (typeof value !== `object` || Array.isArray(value))
     throw new UsageError(`Object configuration settings "${path}" must be an object`);
 
-  const result: Map<string, any> = getDefaultValue(configuration, definition);
+  const result: Map<string, any> = getDefaultValue(configuration, definition, {
+    ignoreArrays: true,
+  });
 
   if (value === null)
     return result;
@@ -578,7 +855,9 @@ function parseShape(configuration: Configuration, path: string, value: unknown, 
   return result;
 }
 
-function parseMap(configuration: Configuration, path: string, value: unknown, definition: MapSettingsDefinition, folder: PortablePath) {
+function parseMap(configuration: Configuration, path: string, valueBase: unknown, definition: MapSettingsDefinition, folder: PortablePath) {
+  const value = configUtils.getValue(valueBase);
+
   const result = new Map<string, any>();
 
   if (typeof value !== `object` || Array.isArray(value))
@@ -588,7 +867,7 @@ function parseMap(configuration: Configuration, path: string, value: unknown, de
     return result;
 
   for (const [propKey, propValue] of Object.entries(value)) {
-    const normalizedKey = definition.normalizeKeys? definition.normalizeKeys(propKey) : propKey;
+    const normalizedKey = definition.normalizeKeys ? definition.normalizeKeys(propKey) : propKey;
     const subPath = `${path}['${normalizedKey}']`;
 
     // @ts-expect-error: SettingsDefinitionNoDefault has ... no default ... but
@@ -601,27 +880,33 @@ function parseMap(configuration: Configuration, path: string, value: unknown, de
   return result;
 }
 
-function getDefaultValue(configuration: Configuration, definition: SettingsDefinition) {
+function getDefaultValue(configuration: Configuration, definition: SettingsDefinition, {ignoreArrays = false}: {ignoreArrays?: boolean} = {}) {
   switch (definition.type) {
     case SettingsType.SHAPE: {
+      if (definition.isArray && !ignoreArrays)
+        return [];
+
       const result = new Map<string, any>();
 
       for (const [propKey, propDefinition] of Object.entries(definition.properties))
         result.set(propKey, getDefaultValue(configuration, propDefinition));
 
       return result;
-    } break;
-
+    }
     case SettingsType.MAP: {
-      return new Map<string, any>();
-    } break;
+      if (definition.isArray && !ignoreArrays)
+        return [];
 
+      return new Map<string, any>();
+    }
     case SettingsType.ABSOLUTE_PATH: {
       if (definition.default === null)
         return null;
 
       if (configuration.projectCwd === null) {
-        if (ppath.isAbsolute(definition.default)) {
+        if (Array.isArray(definition.default)) {
+          return definition.default.map((entry: string) => ppath.normalize(entry as PortablePath));
+        } else if (ppath.isAbsolute(definition.default)) {
           return ppath.normalize(definition.default);
         } else if (definition.isNullable) {
           return null;
@@ -637,11 +922,10 @@ function getDefaultValue(configuration: Configuration, definition: SettingsDefin
           return ppath.resolve(configuration.projectCwd, definition.default);
         }
       }
-    } break;
-
+    }
     default: {
       return definition.default;
-    } break;
+    }
   }
 }
 
@@ -666,20 +950,34 @@ function transformConfiguration(rawValue: unknown, definition: SettingsDefinitio
   }
 
   if (definition.type === SettingsType.MAP && rawValue instanceof Map) {
+    if (rawValue.size === 0)
+      return undefined;
+
     const newValue: Map<string, unknown> = new Map();
 
-    for (const [key, value] of rawValue.entries())
-      newValue.set(key, transformConfiguration(value, definition.valueDefinition, transforms));
+    for (const [key, value] of rawValue.entries()) {
+      const transformedValue = transformConfiguration(value, definition.valueDefinition, transforms);
+      if (typeof transformedValue !== `undefined`) {
+        newValue.set(key, transformedValue);
+      }
+    }
 
     return newValue;
   }
 
   if (definition.type === SettingsType.SHAPE && rawValue instanceof Map) {
+    if (rawValue.size === 0)
+      return undefined;
+
     const newValue: Map<string, unknown> = new Map();
 
     for (const [key, value] of rawValue.entries()) {
       const propertyDefinition = definition.properties[key];
-      newValue.set(key, transformConfiguration(value, propertyDefinition, transforms));
+
+      const transformedValue = transformConfiguration(value, propertyDefinition, transforms);
+      if (typeof transformedValue !== `undefined`) {
+        newValue.set(key, transformedValue);
+      }
     }
 
     return newValue;
@@ -715,21 +1013,65 @@ function getRcFilename() {
   return DEFAULT_RC_FILENAME as Filename;
 }
 
-export enum ProjectLookup {
-  LOCKFILE,
-  MANIFEST,
-  NONE,
+async function tryRead(p: PortablePath) {
+  try {
+    return await xfs.readFilePromise(p);
+  } catch {
+    return Buffer.of();
+  }
+}
+
+async function isSameBinaryContent(a: PortablePath, b: PortablePath) {
+  return Buffer.compare(...await Promise.all([
+    tryRead(a),
+    tryRead(b),
+  ])) === 0;
+}
+
+async function isSameBinaryInode(a: PortablePath, b: PortablePath) {
+  const [aStat, bStat] = await Promise.all([
+    xfs.statPromise(a),
+    xfs.statPromise(b),
+  ]);
+
+  return aStat.dev === bStat.dev && aStat.ino === bStat.ino;
+}
+
+const isSameBinary = process.platform === `win32`
+  ? isSameBinaryContent
+  : isSameBinaryInode;
+
+async function checkYarnPath({configuration, selfPath}: {configuration: Configuration, selfPath: PortablePath}): Promise<PortablePath | null> {
+  const yarnPath = configuration.get(`yarnPath`);
+  const ignorePath = configuration.get(`ignorePath`);
+
+  if (ignorePath || yarnPath === null || yarnPath === selfPath)
+    return null;
+
+  if (await isSameBinary(yarnPath, selfPath))
+    return null;
+
+  return yarnPath;
 }
 
 export type FindProjectOptions = {
-  lookup?: ProjectLookup,
-  strict?: boolean,
-  usePath?: boolean,
-  useRc?: boolean,
+  strict?: boolean;
+  usePathCheck?: PortablePath | null;
+  useRc?: boolean;
+};
+
+export type RcFile = {
+  cwd: PortablePath;
+  path: PortablePath;
+  data: any;
 };
 
 export class Configuration {
+  public static deleteProperty = Symbol();
+
   public static telemetry: TelemetryManager | null = null;
+
+  public isCI = isCI;
 
   public startingCwd: PortablePath;
   public projectCwd: PortablePath | null = null;
@@ -742,11 +1084,7 @@ export class Configuration {
 
   public invalid: Map<string, string> = new Map();
 
-  public packageExtensions: Map<IdentHash, Array<{
-    descriptor: Descriptor,
-    changes: Set<string>,
-    patch: (pkg: Package) => void,
-  }>> = new Map();
+  public env: Record<string, string | undefined> = {};
 
   public limits: Map<string, Limit> = new Map();
 
@@ -805,12 +1143,25 @@ export class Configuration {
    * way around).
    */
 
-  static async find(startingCwd: PortablePath, pluginConfiguration: PluginConfiguration | null, {lookup = ProjectLookup.LOCKFILE, strict = true, usePath = false, useRc = true}: FindProjectOptions = {}) {
+  static async find(startingCwd: PortablePath, pluginConfiguration: PluginConfiguration | null, {strict = true, usePathCheck = null, useRc = true}: FindProjectOptions = {}) {
     const environmentSettings = getEnvironmentSettings();
     delete environmentSettings.rcFilename;
 
+    const configuration = new Configuration(startingCwd);
     const rcFiles = await Configuration.findRcFiles(startingCwd);
-    const homeRcFile = await Configuration.findHomeRcFile();
+
+    const homeRcFile = await Configuration.findFolderRcFile(folderUtils.getHomeFolder());
+    if (homeRcFile) {
+      const rcFile = rcFiles.find(rcFile => rcFile.path === homeRcFile.path);
+      if (!rcFile) {
+        rcFiles.unshift(homeRcFile);
+      }
+    }
+
+    const resolvedRcFile = configUtils.resolveRcFiles(rcFiles.map(rcFile => [rcFile.path, rcFile.data]));
+
+    // XXX: in fact, it is not useful, but in order not to change the parameters of useWithSource, temporarily put a thing to prevent errors.
+    const resolvedRcFileCwd = PortablePath.dot;
 
     // First we will parse the `yarn-path` settings. Doing this now allows us
     // to not have to load the plugins if there's a `yarn-path` configured.
@@ -818,50 +1169,52 @@ export class Configuration {
     type CoreKeys = keyof typeof coreDefinitions;
     type CoreFields = {[key in CoreKeys]: any};
 
-    const pickCoreFields = ({ignoreCwd, yarnPath, ignorePath, lockfileFilename}: CoreFields) => ({ignoreCwd, yarnPath, ignorePath, lockfileFilename});
-    const excludeCoreFields = ({ignoreCwd, yarnPath, ignorePath, lockfileFilename, ...rest}: CoreFields) => rest;
+    const allCoreFieldKeys = new Set(Object.keys(coreDefinitions));
 
-    const configuration = new Configuration(startingCwd);
-    configuration.importSettings(pickCoreFields(coreDefinitions));
+    const pickPrimaryCoreFields = ({yarnPath, ignorePath, injectEnvironmentFiles}: CoreFields) => ({yarnPath, ignorePath, injectEnvironmentFiles});
+    const pickSecondaryCoreFields = ({yarnPath, ignorePath, injectEnvironmentFiles, ...rest}: CoreFields) => {
+      const secondaryCoreFields: CoreFields = {};
+      for (const [key, value] of Object.entries(rest))
+        if (allCoreFieldKeys.has(key))
+          secondaryCoreFields[key] = value;
 
-    configuration.useWithSource(`<environment>`, pickCoreFields(environmentSettings), startingCwd, {strict: false});
-    for (const {path, cwd, data} of rcFiles)
-      configuration.useWithSource(path, pickCoreFields(data), cwd, {strict: false});
-    if (homeRcFile)
-      configuration.useWithSource(homeRcFile.path, pickCoreFields(homeRcFile.data), homeRcFile.cwd, {strict: false});
+      return secondaryCoreFields;
+    };
 
-    if (usePath) {
-      const yarnPath = configuration.get(`yarnPath`);
-      const ignorePath = configuration.get(`ignorePath`);
+    const pickPluginFields = ({yarnPath, ignorePath, ...rest}: CoreFields) => {
+      const pluginFields: any = {};
+      for (const [key, value] of Object.entries(rest))
+        if (!allCoreFieldKeys.has(key))
+          pluginFields[key] = value;
 
-      if (yarnPath !== null && !ignorePath) {
+      return pluginFields;
+    };
+
+    configuration.importSettings(pickPrimaryCoreFields(coreDefinitions));
+    configuration.useWithSource(`<environment>`, pickPrimaryCoreFields(environmentSettings), startingCwd, {strict: false});
+
+    if (resolvedRcFile) {
+      const [source, data] = resolvedRcFile;
+      configuration.useWithSource(source, pickPrimaryCoreFields(data), resolvedRcFileCwd, {strict: false});
+    }
+
+    if (usePathCheck) {
+      const yarnPath = await checkYarnPath({
+        configuration,
+        selfPath: usePathCheck,
+      });
+
+      if (yarnPath !== null) {
         return configuration;
+      } else {
+        configuration.useWithSource(`<override>`, {ignorePath: true}, startingCwd, {strict: false, overwrite: true});
       }
     }
 
     // We need to know the project root before being able to truly instantiate
-    // our configuration, and to know that we need to know the lockfile name
+    // our configuration.
 
-    const lockfileFilename = configuration.get(`lockfileFilename`);
-
-    let projectCwd: PortablePath | null;
-    switch (lookup) {
-      case ProjectLookup.LOCKFILE: {
-        projectCwd = await Configuration.findProjectCwd(startingCwd, lockfileFilename);
-      } break;
-
-      case ProjectLookup.MANIFEST: {
-        projectCwd = await Configuration.findProjectCwd(startingCwd, null);
-      } break;
-
-      case ProjectLookup.NONE: {
-        if (xfs.existsSync(ppath.join(startingCwd, `package.json` as Filename))) {
-          projectCwd = ppath.resolve(startingCwd);
-        } else {
-          projectCwd = null;
-        }
-      } break;
-    }
+    const projectCwd = await Configuration.findProjectCwd(startingCwd);
 
     // Great! We now have enough information to really start to setup the
     // core configuration object.
@@ -869,38 +1222,64 @@ export class Configuration {
     configuration.startingCwd = startingCwd;
     configuration.projectCwd = projectCwd;
 
-    configuration.importSettings(excludeCoreFields(coreDefinitions));
+    const env = Object.assign(Object.create(null), process.env);
+    configuration.env = env;
+
+    // load the environment files
+    const environmentFiles = await Promise.all(configuration.get(`injectEnvironmentFiles`).map(async p => {
+      const content = p.endsWith(`?`)
+        ? await xfs.readFilePromise(p.slice(0, -1) as PortablePath, `utf8`).catch(() => ``)
+        : await xfs.readFilePromise(p as PortablePath, `utf8`);
+
+      return parseDotEnv(content);
+    }));
+
+    for (const environmentEntries of environmentFiles)
+      for (const [key, value] of Object.entries(environmentEntries))
+        configuration.env[key] = miscUtils.replaceEnvVariables(value, {env});
+
+    // load all fields of the core definitions
+    configuration.importSettings(pickSecondaryCoreFields(coreDefinitions));
+    configuration.useWithSource(`<environment>`, pickSecondaryCoreFields(environmentSettings), startingCwd, {strict});
+
+    if (resolvedRcFile) {
+      const [source, data] = resolvedRcFile;
+      configuration.useWithSource(source, pickSecondaryCoreFields(data), resolvedRcFileCwd, {strict});
+    }
 
     // Now that the configuration object is almost ready, we need to load all
     // the configured plugins
 
-    const plugins = new Map<string, Plugin>([
+    const getDefault = (object: any) => {
+      return `default` in object ? object.default : object;
+    };
+
+    // load the core plugins
+    const corePlugins = new Map<string, Plugin>([
       [`@@core`, CorePlugin],
     ]);
 
-    const interop =
-      (obj: any) => obj.__esModule
-        ? obj.default
-        : obj;
-
-    if (pluginConfiguration !== null) {
+    if (pluginConfiguration !== null)
       for (const request of pluginConfiguration.plugins.keys())
-        plugins.set(request, interop(pluginConfiguration.modules.get(request)));
+        corePlugins.set(request, getDefault(pluginConfiguration.modules.get(request)));
 
+    for (const [name, corePlugin] of corePlugins)
+      configuration.activatePlugin(name, corePlugin);
+
+    // load third-party plugins
+    const thirdPartyPlugins = new Map<string, Plugin>([]);
+    if (pluginConfiguration !== null) {
       const requireEntries = new Map();
-      for (const request of nodeUtils.builtinModules())
-        requireEntries.set(request, () => nodeUtils.dynamicRequire(request));
+
       for (const [request, embedModule] of pluginConfiguration.modules)
         requireEntries.set(request, () => embedModule);
 
       const dynamicPlugins = new Set();
 
-      const getDefault = (object: any) => {
-        return object.default || object;
-      };
-
-      const importPlugin = (pluginPath: PortablePath, source: string) => {
-        const {factory, name} = nodeUtils.dynamicRequire(npath.fromPortablePath(pluginPath));
+      const importPlugin = async (pluginPath: PortablePath, source: string) => {
+        const {factory, name} = miscUtils.dynamicRequire(pluginPath);
+        if (!factory)
+          return;
 
         // Prevent plugin redefinition so that the ones declared deeper in the
         // filesystem always have precedence over the ones below.
@@ -909,6 +1288,9 @@ export class Configuration {
 
         const pluginRequireEntries = new Map(requireEntries);
         const pluginRequire = (request: string) => {
+          if (isBuiltin(request))
+            return miscUtils.dynamicRequire(request);
+
           if (pluginRequireEntries.has(request)) {
             return pluginRequireEntries.get(request)();
           } else {
@@ -916,8 +1298,8 @@ export class Configuration {
           }
         };
 
-        const plugin = miscUtils.prettifySyncErrors(() => {
-          return getDefault(factory(pluginRequire));
+        const plugin = await miscUtils.prettifyAsyncErrors(async () => {
+          return getDefault(await factory(pluginRequire));
         }, message => {
           return `${message} (when initializing ${name}, defined in ${source})`;
         });
@@ -925,13 +1307,13 @@ export class Configuration {
         requireEntries.set(name, () => plugin);
 
         dynamicPlugins.add(name);
-        plugins.set(name, plugin);
+        thirdPartyPlugins.set(name, plugin);
       };
 
       if (environmentSettings.plugins) {
         for (const userProvidedPath of environmentSettings.plugins.split(`;`)) {
           const pluginPath = ppath.resolve(startingCwd, npath.toPortablePath(userProvidedPath));
-          importPlugin(pluginPath, `<environment>`);
+          await importPlugin(pluginPath, `<environment>`);
         }
       }
 
@@ -946,37 +1328,74 @@ export class Configuration {
             ? userPluginEntry.path
             : userPluginEntry;
 
+          const userProvidedSpec = userPluginEntry?.spec ?? ``;
+          const userProvidedChecksum = userPluginEntry?.checksum ?? ``;
+
+          if (LEGACY_PLUGINS.has(userProvidedSpec))
+            continue;
+
           const pluginPath = ppath.resolve(cwd, npath.toPortablePath(userProvidedPath));
-          importPlugin(pluginPath, path);
+          if (!await xfs.existsPromise(pluginPath)) {
+            if (!userProvidedSpec) {
+              const prettyPluginName = formatUtils.pretty(configuration, ppath.basename(pluginPath, `.cjs`), formatUtils.Type.NAME);
+              const prettyGitIgnore = formatUtils.pretty(configuration, `.gitignore`, formatUtils.Type.NAME) ;
+              const prettyYarnrc = formatUtils.pretty(configuration, configuration.values.get(`rcFilename`), formatUtils.Type.NAME) ;
+              const prettyUrl = formatUtils.pretty(configuration, `https://yarnpkg.com/getting-started/qa#which-files-should-be-gitignored`, formatUtils.Type.URL) ;
+              throw new UsageError(`Missing source for the ${prettyPluginName} plugin - please try to remove the plugin from ${prettyYarnrc} then reinstall it manually. This error usually occurs because ${prettyGitIgnore} is incorrect, check ${prettyUrl} to make sure your plugin folder isn't gitignored.`);
+            }
+
+            if (!userProvidedSpec.match(/^https?:/)) {
+              const prettyPluginName = formatUtils.pretty(configuration, ppath.basename(pluginPath, `.cjs`), formatUtils.Type.NAME);
+              const prettyYarnrc = formatUtils.pretty(configuration, configuration.values.get(`rcFilename`), formatUtils.Type.NAME) ;
+              throw new UsageError(`Failed to recognize the source for the ${prettyPluginName} plugin - please try to delete the plugin from ${prettyYarnrc} then reinstall it manually.`);
+            }
+
+            const pluginBuffer = await httpUtils.get(userProvidedSpec, {configuration});
+            const pluginChecksum = hashUtils.makeHash(pluginBuffer);
+
+            // if there is no checksum, this means that the user used --no-checksum and does not need to check this plugin
+            if (userProvidedChecksum && userProvidedChecksum !== pluginChecksum) {
+              const prettyPluginName = formatUtils.pretty(configuration, ppath.basename(pluginPath, `.cjs`), formatUtils.Type.NAME);
+              const prettyYarnrc = formatUtils.pretty(configuration, configuration.values.get(`rcFilename`), formatUtils.Type.NAME) ;
+              const prettyPluginImportCommand = formatUtils.pretty(configuration, `yarn plugin import ${userProvidedSpec}`, formatUtils.Type.CODE) ;
+              throw new UsageError(`Failed to fetch the ${prettyPluginName} plugin from its remote location: its checksum seems to have changed. If this is expected, please remove the plugin from ${prettyYarnrc} then run ${prettyPluginImportCommand} to reimport it.`);
+            }
+
+            await xfs.mkdirPromise(ppath.dirname(pluginPath), {recursive: true});
+            await xfs.writeFilePromise(pluginPath, pluginBuffer);
+          }
+
+          await importPlugin(pluginPath, path);
         }
       }
     }
 
-    for (const [name, plugin] of plugins)
-      configuration.activatePlugin(name, plugin);
+    for (const [name, thirdPartyPlugin] of thirdPartyPlugins)
+      configuration.activatePlugin(name, thirdPartyPlugin);
 
-    configuration.useWithSource(`<environment>`, excludeCoreFields(environmentSettings), startingCwd, {strict});
-    for (const {path, cwd, data} of rcFiles)
-      configuration.useWithSource(path, excludeCoreFields(data), cwd, {strict});
+    // load values of all plugin definitions
+    configuration.useWithSource(`<environment>`, pickPluginFields(environmentSettings), startingCwd, {strict});
 
-    // The home configuration is never strict because it improves support for
-    // multiple projects using different Yarn versions on the same machine
-    if (homeRcFile)
-      configuration.useWithSource(homeRcFile.path, excludeCoreFields(homeRcFile.data), homeRcFile.cwd, {strict: false});
+    if (resolvedRcFile) {
+      const [source, data] = resolvedRcFile;
+      configuration.useWithSource(source, pickPluginFields(data), resolvedRcFileCwd, {strict});
+    }
 
     if (configuration.get(`enableGlobalCache`)) {
       configuration.values.set(`cacheFolder`, `${configuration.get(`globalFolder`)}/cache`);
       configuration.sources.set(`cacheFolder`, `<internal>`);
     }
 
-    await configuration.refreshPackageExtensions();
-
     return configuration;
   }
 
   static async findRcFiles(startingCwd: PortablePath) {
     const rcFilename = getRcFilename();
-    const rcFiles = [];
+    const rcFiles: Array<{
+      path: PortablePath;
+      cwd: PortablePath;
+      data: any;
+    }> = [];
 
     let nextCwd = startingCwd;
     let currentCwd = null;
@@ -1001,7 +1420,7 @@ export class Configuration {
           throw new UsageError(`Parse error when loading ${rcPath}; please check it's proper Yaml${tip}`);
         }
 
-        rcFiles.push({path: rcPath, cwd: currentCwd, data});
+        rcFiles.unshift({path: rcPath, cwd: currentCwd, data});
       }
 
       nextCwd = ppath.dirname(currentCwd);
@@ -1010,23 +1429,24 @@ export class Configuration {
     return rcFiles;
   }
 
-  static async findHomeRcFile() {
-    const rcFilename = getRcFilename();
+  static async findFolderRcFile(cwd: PortablePath): Promise<RcFile | null> {
+    const path = ppath.join(cwd, Filename.rc);
 
-    const homeFolder = folderUtils.getHomeFolder();
-    const homeRcFilePath = ppath.join(homeFolder, rcFilename);
+    let content: string;
+    try {
+      content = await xfs.readFilePromise(path, `utf8`);
+    } catch (err) {
+      if (err.code === `ENOENT`)
+        return null;
 
-    if (xfs.existsSync(homeRcFilePath)) {
-      const content = await xfs.readFilePromise(homeRcFilePath, `utf8`);
-      const data = parseSyml(content) as any;
-
-      return {path: homeRcFilePath, cwd: homeFolder, data};
+      throw err;
     }
 
-    return null;
+    const data = parseSyml(content) as any;
+    return {path, cwd, data};
   }
 
-  static async findProjectCwd(startingCwd: PortablePath, lockfileFilename: Filename | null) {
+  static async findProjectCwd(startingCwd: PortablePath) {
     let projectCwd = null;
 
     let nextCwd = startingCwd;
@@ -1035,19 +1455,11 @@ export class Configuration {
     while (nextCwd !== currentCwd) {
       currentCwd = nextCwd;
 
-      if (xfs.existsSync(ppath.join(currentCwd, `package.json` as Filename)))
-        projectCwd = currentCwd;
+      if (xfs.existsSync(ppath.join(currentCwd, Filename.lockfile)))
+        return currentCwd;
 
-      if (lockfileFilename !== null) {
-        if (xfs.existsSync(ppath.join(currentCwd, lockfileFilename))) {
-          projectCwd = currentCwd;
-          break;
-        }
-      } else {
-        if (projectCwd !== null) {
-          break;
-        }
-      }
+      if (xfs.existsSync(ppath.join(currentCwd, Filename.manifest)))
+        projectCwd = currentCwd;
 
       nextCwd = ppath.dirname(currentCwd);
     }
@@ -1055,7 +1467,7 @@ export class Configuration {
     return projectCwd;
   }
 
-  static async updateConfiguration(cwd: PortablePath, patch: {[key: string]: ((current: unknown) => unknown) | {} | undefined} | ((current: {[key: string]: unknown}) => {[key: string]: unknown})) {
+  static async updateConfiguration(cwd: PortablePath, patch: {[key: string]: ((current: unknown) => unknown) | {} | undefined} | ((current: {[key: string]: unknown}) => {[key: string]: unknown}), opts: {immutable?: boolean} = {}) {
     const rcFilename = getRcFilename();
     const configurationPath =  ppath.join(cwd, rcFilename as PortablePath);
 
@@ -1074,7 +1486,7 @@ export class Configuration {
       }
 
       if (replacement === current) {
-        return;
+        return false;
       }
     } else {
       replacement = current;
@@ -1097,17 +1509,58 @@ export class Configuration {
         if (currentValue === nextValue)
           continue;
 
-        replacement[key] = nextValue;
+        if (nextValue === Configuration.deleteProperty)
+          delete replacement[key];
+        else
+          replacement[key] = nextValue;
+
         patched = true;
       }
 
       if (!patched) {
-        return;
+        return false;
       }
     }
 
     await xfs.changeFilePromise(configurationPath, stringifySyml(replacement), {
       automaticNewlines: true,
+    });
+
+    return true;
+  }
+
+  static async addPlugin(cwd: PortablePath, pluginMetaList: Array<PluginMeta>) {
+    if (pluginMetaList.length === 0)
+      return;
+
+    await Configuration.updateConfiguration(cwd, (current: any) => {
+      const currentPluginMetaList = current.plugins ?? [];
+      if (currentPluginMetaList.length === 0)
+        return {...current, plugins: pluginMetaList};
+
+      const newPluginMetaList = [];
+      let notYetProcessedList = [...pluginMetaList];
+
+      for (const currentPluginMeta of currentPluginMetaList) {
+        const currentPluginPath = typeof currentPluginMeta !== `string`
+          ? currentPluginMeta.path
+          : currentPluginMeta;
+
+        const updatingPlugin = notYetProcessedList.find(pluginMeta => {
+          return pluginMeta.path === currentPluginPath;
+        });
+
+        if (updatingPlugin) {
+          newPluginMetaList.push(updatingPlugin);
+          notYetProcessedList = notYetProcessedList.filter(p => p !== updatingPlugin);
+        } else {
+          newPluginMetaList.push(currentPluginMeta);
+        }
+      }
+
+      newPluginMetaList.push(...notYetProcessedList);
+
+      return {...current, plugins: newPluginMetaList};
     });
   }
 
@@ -1151,8 +1604,15 @@ export class Configuration {
   }
 
   use(source: string, data: {[key: string]: unknown}, folder: PortablePath, {strict = true, overwrite = false}: {strict?: boolean, overwrite?: boolean} = {}) {
-    for (const key of Object.keys(data)) {
+    strict = strict && this.get(`enableStrictSettings`);
+
+    for (const key of [`enableStrictSettings`, ...Object.keys(data)]) {
       const value = data[key];
+
+      const fieldSource = configUtils.getSource(value);
+      if (fieldSource)
+        source = fieldSource;
+
       if (typeof value === `undefined`)
         continue;
 
@@ -1170,7 +1630,17 @@ export class Configuration {
 
       const definition = this.settings.get(key);
       if (!definition) {
-        if (strict) {
+        const homeFolder = folderUtils.getHomeFolder();
+
+        const rcFileFolder = source[0] !== `<`
+          ? ppath.dirname(source as PortablePath)
+          : null;
+
+        const isHomeRcFile = rcFileFolder !== null
+          ? homeFolder === rcFileFolder
+          : false;
+
+        if (strict && !isHomeRcFile) {
           throw new UsageError(`Unrecognized or legacy configuration settings found: ${key} - run "yarn config -v" to see the list of settings supported in Yarn`);
         } else {
           this.invalid.set(key, source);
@@ -1178,23 +1648,35 @@ export class Configuration {
         }
       }
 
-      if (this.sources.has(key) && !(overwrite || definition.type === SettingsType.MAP))
+      if (this.sources.has(key) && !(overwrite || definition.type === SettingsType.MAP || definition.isArray && definition.concatenateValues))
         continue;
 
       let parsed;
       try {
-        parsed = parseValue(this, key, data[key], definition, folder);
+        parsed = parseValue(this, key, value, definition, folder);
       } catch (error) {
         error.message += ` in ${formatUtils.pretty(this, source, formatUtils.Type.PATH)}`;
         throw error;
+      }
+
+      if (key === `enableStrictSettings` && source !== `<environment>`) {
+        strict = parsed as boolean;
+        continue;
       }
 
       if (definition.type === SettingsType.MAP) {
         const previousValue = this.values.get(key) as Map<string, any>;
         this.values.set(key, new Map(overwrite
           ? [...previousValue, ...parsed as Map<string, any>]
-          : [...parsed as Map<string, any>, ...previousValue]
+          : [...parsed as Map<string, any>, ...previousValue],
         ));
+        this.sources.set(key, `${this.sources.get(key)}, ${source}`);
+      } else if (definition.isArray && definition.concatenateValues) {
+        const previousValue = this.values.get(key) as Array<unknown>;
+        this.values.set(key, overwrite
+          ? [...previousValue, ...parsed as Array<unknown>]
+          : [...parsed as Array<unknown>, ...previousValue],
+        );
         this.sources.set(key, `${this.sources.get(key)}, ${source}`);
       } else {
         this.values.set(key, parsed);
@@ -1204,10 +1686,7 @@ export class Configuration {
   }
 
   get<K extends keyof ConfigurationValueMap>(key: K): ConfigurationValueMap[K];
-  /** @deprecated pass in a known configuration key instead */
-  get<T>(key: string): T;
-  /** @note Type will change to unknown in a future major version */
-  get(key: string): any;
+  get(key: string): unknown;
   get(key: string) {
     if (!this.values.has(key))
       throw new Error(`Invalid configuration key "${key}"`);
@@ -1264,13 +1743,14 @@ export class Configuration {
       for (const resolver of plugin.resolvers || [])
         pluginResolvers.push(new resolver());
 
-    return new MultiResolver([
-      new VirtualResolver(),
-      new WorkspaceResolver(),
-      new ProtocolResolver(),
+    return (
+      new MultiResolver([
+        new VirtualResolver(),
+        new WorkspaceResolver(),
 
-      ...pluginResolvers,
-    ]);
+        ...pluginResolvers,
+      ])
+    );
   }
 
   makeFetcher() {
@@ -1298,66 +1778,163 @@ export class Configuration {
     return linkers;
   }
 
-  async refreshPackageExtensions() {
+  getSupportedArchitectures(): nodeUtils.ArchitectureSet {
+    const architecture = nodeUtils.getArchitecture();
+    const supportedArchitectures = this.get(`supportedArchitectures`);
+
+    let os = supportedArchitectures.get(`os`);
+    if (os !== null)
+      os = os.map(value => value === `current` ? architecture.os : value);
+
+    let cpu = supportedArchitectures.get(`cpu`);
+    if (cpu !== null)
+      cpu = cpu.map(value => value === `current` ? architecture.cpu : value);
+
+    let libc = supportedArchitectures.get(`libc`);
+    if (libc !== null)
+      libc = miscUtils.mapAndFilter(libc, value => value === `current` ? architecture.libc ?? miscUtils.mapAndFilter.skip : value);
+
+    return {os, cpu, libc};
+  }
+
+  isInteractive({interactive, stdout}: {interactive?: boolean, stdout: Writable}): boolean {
+    if (!(stdout as WriteStream).isTTY)
+      return false;
+
+    return interactive ?? this.get(`preferInteractive`);
+  }
+
+  private packageExtensions: PackageExtensions | null = null;
+
+  /**
+   * Computes and caches the package extensions.
+   */
+  async getPackageExtensions(): Promise<PackageExtensions> {
+    if (this.packageExtensions !== null)
+      return this.packageExtensions;
+
     this.packageExtensions = new Map();
     const packageExtensions = this.packageExtensions;
 
-    const registerPackageExtension = (descriptor: Descriptor, extensionData: any) => {
-      if (!semver.validRange(descriptor.range))
-        throw new Error(`Only semver ranges are allowed as keys for the lockfileExtensions setting`);
+    const registerPackageExtension = (descriptor: Descriptor, extensionData: PackageExtensionData, {userProvided = false}: {userProvided?: boolean} = {}) => {
+      if (!semverUtils.validRange(descriptor.range))
+        throw new Error(`Only semver ranges are allowed as keys for the packageExtensions setting`);
 
       const extension = new Manifest();
-      extension.load(extensionData);
+      extension.load(extensionData, {yamlCompatibilityMode: true});
 
-      miscUtils.getArrayWithDefault(packageExtensions, descriptor.identHash).push({
-        descriptor,
-        changes: new Set([
-          ...[
-            ...extension.dependencies.values(),
-            ...extension.peerDependencies.values(),
-          ].map(descriptor => {
-            return structUtils.stringifyIdent(descriptor);
-          }),
-          ...extension.dependenciesMeta.keys(),
-          ...extension.peerDependenciesMeta.keys(),
-        ]),
-        patch: pkg => {
-          pkg.dependencies = new Map([...pkg.dependencies, ...extension.dependencies]);
-          pkg.peerDependencies = new Map([...pkg.peerDependencies, ...extension.peerDependencies]);
-          pkg.dependenciesMeta = new Map([...pkg.dependenciesMeta, ...extension.dependenciesMeta]);
-          pkg.peerDependenciesMeta = new Map([...pkg.peerDependenciesMeta, ...extension.peerDependenciesMeta]);
-        },
-      });
+      const extensionsPerIdent = miscUtils.getArrayWithDefault(packageExtensions, descriptor.identHash);
+
+      const extensionsPerRange: Array<PackageExtension> = [];
+      extensionsPerIdent.push([descriptor.range, extensionsPerRange]);
+
+      const baseExtension = {
+        status: PackageExtensionStatus.Inactive,
+        userProvided,
+        parentDescriptor: descriptor,
+      } as const;
+
+      for (const dependency of extension.dependencies.values())
+        extensionsPerRange.push({...baseExtension, type: PackageExtensionType.Dependency, descriptor: dependency});
+      for (const peerDependency of extension.peerDependencies.values())
+        extensionsPerRange.push({...baseExtension, type: PackageExtensionType.PeerDependency, descriptor: peerDependency});
+
+      for (const [selector, meta] of extension.peerDependenciesMeta) {
+        for (const [key, value] of Object.entries(meta)) {
+          extensionsPerRange.push({...baseExtension, type: PackageExtensionType.PeerDependencyMeta, selector, key: key as keyof typeof meta, value});
+        }
+      }
     };
-
-    for (const [descriptorString, extensionData] of this.get(`packageExtensions`))
-      registerPackageExtension(structUtils.parseDescriptor(descriptorString, true), extensionData);
 
     await this.triggerHook(hooks => {
       return hooks.registerPackageExtensions;
     }, this, registerPackageExtension);
+
+    for (const [descriptorString, extensionData] of this.get(`packageExtensions`))
+      registerPackageExtension(structUtils.parseDescriptor(descriptorString, true), miscUtils.convertMapsToIndexableObjects(extensionData), {userProvided: true});
+
+    return packageExtensions;
   }
 
-  normalizePackage(original: Package) {
+  normalizeLocator(locator: Locator) {
+    if (semverUtils.validRange(locator.reference))
+      return structUtils.makeLocator(locator, `${this.get(`defaultProtocol`)}${locator.reference}`);
+
+    if (TAG_REGEXP.test(locator.reference))
+      return structUtils.makeLocator(locator, `${this.get(`defaultProtocol`)}${locator.reference}`);
+
+    return locator;
+  }
+
+  // TODO: Rename into `normalizeLocator`?
+  // TODO: Move into `structUtils`, and remove references to `defaultProtocol` (we can make it a constant, same as the lockfile name)
+  normalizeDependency(dependency: Descriptor) {
+    if (semverUtils.validRange(dependency.range))
+      return structUtils.makeDescriptor(dependency, `${this.get(`defaultProtocol`)}${dependency.range}`);
+
+    if (TAG_REGEXP.test(dependency.range))
+      return structUtils.makeDescriptor(dependency, `${this.get(`defaultProtocol`)}${dependency.range}`);
+
+    return dependency;
+  }
+
+  normalizeDependencyMap<TKey>(dependencyMap: Map<TKey, Descriptor>) {
+    return new Map([...dependencyMap].map(([key, dependency]) => {
+      return [key, this.normalizeDependency(dependency)];
+    }));
+  }
+
+  normalizePackage(original: Package, {packageExtensions}: {packageExtensions: PackageExtensions}) {
     const pkg = structUtils.copyPackage(original);
 
     // We use the extensions to define additional dependencies that weren't
     // properly listed in the original package definition
 
-    if (this.packageExtensions == null)
-      throw new Error(`refreshPackageExtensions has to be called before normalizing packages`);
-
-    const extensionList = this.packageExtensions.get(original.identHash);
-    if (typeof extensionList !== `undefined`) {
+    const extensionsPerIdent = packageExtensions.get(original.identHash);
+    if (typeof extensionsPerIdent !== `undefined`) {
       const version = original.version;
 
       if (version !== null) {
-        const extensionEntry = extensionList.find(({descriptor}) => {
-          return semverUtils.satisfiesWithPrereleases(version, descriptor.range);
-        });
+        for (const [range, extensionsPerRange] of extensionsPerIdent) {
+          if (!semverUtils.satisfiesWithPrereleases(version, range))
+            continue;
 
-        if (typeof extensionEntry !== `undefined`) {
-          extensionEntry.patch(pkg);
+          for (const extension of extensionsPerRange) {
+            // If an extension is active for a package but redundant
+            // for another one, it should be considered active
+            if (extension.status === PackageExtensionStatus.Inactive)
+              extension.status = PackageExtensionStatus.Redundant;
+
+            switch (extension.type) {
+              case PackageExtensionType.Dependency: {
+                const currentDependency = pkg.dependencies.get(extension.descriptor.identHash);
+                if (typeof currentDependency === `undefined`) {
+                  extension.status = PackageExtensionStatus.Active;
+                  pkg.dependencies.set(extension.descriptor.identHash, this.normalizeDependency(extension.descriptor));
+                }
+              } break;
+
+              case PackageExtensionType.PeerDependency: {
+                const currentPeerDependency = pkg.peerDependencies.get(extension.descriptor.identHash);
+                if (typeof currentPeerDependency === `undefined`) {
+                  extension.status = PackageExtensionStatus.Active;
+                  pkg.peerDependencies.set(extension.descriptor.identHash, extension.descriptor);
+                }
+              } break;
+
+              case PackageExtensionType.PeerDependencyMeta: {
+                const currentPeerDependencyMeta = pkg.peerDependenciesMeta.get(extension.selector);
+                if (typeof currentPeerDependencyMeta === `undefined` || !Object.hasOwn(currentPeerDependencyMeta, extension.key) || currentPeerDependencyMeta[extension.key] !== extension.value) {
+                  extension.status = PackageExtensionStatus.Active;
+                  miscUtils.getFactoryWithDefault(pkg.peerDependenciesMeta, extension.selector, () => ({} as PeerDependencyMeta))[extension.key] = extension.value;
+                }
+              } break;
+
+              default: {
+                miscUtils.assertNever(extension);
+              }
+            }
+          }
         }
       }
     }
@@ -1373,21 +1950,6 @@ export class Configuration {
         : `${descriptor.name}`;
     };
 
-    for (const descriptor of pkg.peerDependencies.values()) {
-      if (descriptor.scope === `@types`)
-        continue;
-
-      const typesName = getTypesName(descriptor);
-      const typesIdent = structUtils.makeIdent(`types`, typesName);
-
-      if (pkg.peerDependencies.has(typesIdent.identHash) || pkg.peerDependenciesMeta.has(typesIdent.identHash))
-        continue;
-
-      pkg.peerDependenciesMeta.set(structUtils.stringifyIdent(typesIdent), {
-        optional: true,
-      });
-    }
-
     // I don't like implicit dependencies, but package authors are reluctant to
     // use optional peer dependencies because they would print warnings in older
     // npm releases.
@@ -1400,6 +1962,24 @@ export class Configuration {
       }
     }
 
+    // Automatically add corresponding `@types` optional peer dependencies
+    for (const descriptor of pkg.peerDependencies.values()) {
+      if (descriptor.scope === `types`)
+        continue;
+
+      const typesName = getTypesName(descriptor);
+      const typesIdent = structUtils.makeIdent(`types`, typesName);
+      const stringifiedTypesIdent = structUtils.stringifyIdent(typesIdent);
+
+      if (pkg.peerDependencies.has(typesIdent.identHash) || pkg.peerDependenciesMeta.has(stringifiedTypesIdent))
+        continue;
+
+      pkg.peerDependencies.set(typesIdent.identHash, structUtils.makeDescriptor(typesIdent, `*`));
+      pkg.peerDependenciesMeta.set(stringifiedTypesIdent, {
+        optional: true,
+      });
+    }
+
     // We sort the dependencies so that further iterations always occur in the
     // same order, regardless how the various registries formatted their output
 
@@ -1409,9 +1989,9 @@ export class Configuration {
     return pkg;
   }
 
-  getLimit(key: string) {
+  getLimit<K extends miscUtils.FilterKeys<ConfigurationValueMap, number>>(key: K) {
     return miscUtils.getFactoryWithDefault(this.limits, key, () => {
-      return pLimit(this.get<number>(key));
+      return pLimit(this.get(key));
     });
   }
 
@@ -1471,12 +2051,5 @@ export class Configuration {
     }
 
     return null;
-  }
-
-  /**
-   * @deprecated Prefer using formatUtils.pretty instead, which is type-safe
-   */
-  format(value: string, formatType: formatUtils.Type | string): string {
-    return formatUtils.pretty(this, value, formatType);
   }
 }

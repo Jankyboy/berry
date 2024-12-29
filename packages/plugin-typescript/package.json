@@ -1,46 +1,53 @@
 {
   "name": "@yarnpkg/plugin-typescript",
-  "version": "2.1.1",
+  "version": "4.1.1",
   "license": "BSD-2-Clause",
   "main": "./sources/index.ts",
+  "exports": {
+    ".": "./sources/index.ts",
+    "./package.json": "./package.json"
+  },
   "dependencies": {
-    "@yarnpkg/plugin-pack": "workspace:^2.2.0",
+    "@yarnpkg/fslib": "workspace:^",
+    "@yarnpkg/plugin-pack": "workspace:^",
     "algoliasearch": "^4.2.0",
     "semver": "^7.1.2",
-    "tslib": "^1.13.0"
+    "tslib": "^2.4.0"
   },
   "peerDependencies": {
-    "@yarnpkg/cli": "^2.2.2",
-    "@yarnpkg/core": "^2.2.2",
-    "@yarnpkg/plugin-essentials": "^2.2.0"
+    "@yarnpkg/cli": "workspace:^",
+    "@yarnpkg/core": "workspace:^",
+    "@yarnpkg/plugin-essentials": "workspace:^"
   },
   "devDependencies": {
     "@algolia/requester-common": "4.0.0-beta.14",
     "@types/semver": "^7.1.0",
-    "@yarnpkg/builder": "workspace:^2.1.1",
-    "@yarnpkg/cli": "workspace:^2.2.2",
-    "@yarnpkg/core": "workspace:^2.2.2",
-    "@yarnpkg/plugin-essentials": "workspace:^2.2.0",
-    "typescript": "4.1.0-beta"
+    "@yarnpkg/builder": "workspace:^",
+    "@yarnpkg/cli": "workspace:^",
+    "@yarnpkg/core": "workspace:^",
+    "@yarnpkg/plugin-essentials": "workspace:^"
   },
   "scripts": {
-    "build:plugin-typescript": "builder build plugin",
-    "update-local": "yarn build:plugin-typescript && rsync -a --delete bundles/ bin/",
     "postpack": "rm -rf lib",
     "prepack": "run build:compile \"$(pwd)\""
   },
   "repository": {
     "type": "git",
-    "url": "ssh://git@github.com/yarnpkg/berry.git"
+    "url": "ssh://git@github.com/yarnpkg/berry.git",
+    "directory": "packages/plugin-typescript"
   },
   "publishConfig": {
     "main": "./lib/index.js",
-    "typings": "./lib/index.d.ts"
+    "exports": {
+      ".": "./lib/index.js",
+      "./package.json": "./package.json"
+    }
   },
   "files": [
     "/lib/**/*"
   ],
   "engines": {
-    "node": ">=10.19.0"
-  }
+    "node": ">=18.12.0"
+  },
+  "stableVersion": "4.1.1"
 }

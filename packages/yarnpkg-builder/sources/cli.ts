@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 
-import {Cli, Command}     from 'clipanion';
+import {Cli, Builtins}    from 'clipanion';
 
 import BuildBundleCommand from './commands/build/bundle';
 import BuildPluginCommand from './commands/build/plugin';
-import ClipanionCommand   from './commands/clipanion';
 import NewPluginCommand   from './commands/new/plugin';
 
 const cli = new Cli({
@@ -17,8 +16,8 @@ cli.register(NewPluginCommand);
 cli.register(BuildBundleCommand);
 cli.register(BuildPluginCommand);
 
-cli.register(ClipanionCommand);
-cli.register(Command.Entries.Help);
-cli.register(Command.Entries.Version);
+cli.register(Builtins.DefinitionsCommand);
+cli.register(Builtins.HelpCommand);
+cli.register(Builtins.VersionCommand);
 
 cli.runExit(process.argv.slice(2), Cli.defaultContext);

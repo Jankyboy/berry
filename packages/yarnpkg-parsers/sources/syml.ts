@@ -1,4 +1,3 @@
-// @ts-expect-error
 import {safeLoad, FAILSAFE_SCHEMA} from 'js-yaml';
 
 import {parse}                     from './grammars/syml';
@@ -26,7 +25,7 @@ function isRemovableField(value: any): boolean {
   if (typeof value === `undefined`)
     return true;
 
-  if (typeof value === `object` && value !== null)
+  if (typeof value === `object` && value !== null && !Array.isArray(value))
     return Object.keys(value).every(key => isRemovableField(value[key]));
 
   return false;
@@ -56,16 +55,9 @@ function stringifyValue(value: any, indentLevel: number, newLineIfObject: boolea
   }
 
   if (typeof value === `object` && value) {
-    let data: any;
-    let sort: boolean;
-
-    if (value instanceof PreserveOrdering) {
-      data = value.data;
-      sort = false;
-    } else {
-      data = value;
-      sort = true;
-    }
+    const [data, sort] = value instanceof PreserveOrdering
+      ? [value.data, false]
+      : [value, true];
 
     const indent = `  `.repeat(indentLevel);
 
@@ -99,11 +91,16 @@ function stringifyValue(value: any, indentLevel: number, newLineIfObject: boolea
         ? indent
         : ``;
 
-      if (stringifiedValue.startsWith(`\n`)) {
-        return `${recordIndentation}${stringifiedKey}:${stringifiedValue}`;
-      } else {
-        return `${recordIndentation}${stringifiedKey}: ${stringifiedValue}`;
-      }
+      // Yaml 1.2 spec says that keys over 1024 characters need to be prefixed with ? and the : goes in a new line
+      const keyPart = stringifiedKey.length > 1024
+        ? `? ${stringifiedKey}\n${recordIndentation}:`
+        : `${stringifiedKey}:`;
+
+      const valuePart = stringifiedValue.startsWith(`\n`)
+        ? stringifiedValue
+        : ` ${stringifiedValue}`;
+
+      return `${recordIndentation}${keyPart}${valuePart}`;
     }).join(indentLevel === 0 ? `\n` : ``) || `\n`;
 
     if (!newLineIfObject) {
@@ -144,6 +141,7 @@ function parseViaJsYaml(source: string) {
 
   const value = safeLoad(source, {
     schema: FAILSAFE_SCHEMA,
+    json: true,
   });
 
   // Empty files are parsed as `undefined` instead of an empty object

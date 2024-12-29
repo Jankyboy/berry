@@ -1,25 +1,36 @@
-import {BaseCommand, WorkspaceRequiredError}                                                                                            from '@yarnpkg/cli';
-import {Cache, Configuration, Project, HardDependencies, formatUtils, miscUtils, structUtils, Descriptor, DescriptorHash, StreamReport} from '@yarnpkg/core';
-import {ItemOptions}                                                                                                                    from '@yarnpkg/libui/sources/components/ItemOptions';
-import {ScrollableItems}                                                                                                                from '@yarnpkg/libui/sources/components/ScrollableItems';
-import {useMinistore}                                                                                                                   from '@yarnpkg/libui/sources/hooks/useMinistore';
-import {renderForm, SubmitInjectedComponent}                                                                                            from '@yarnpkg/libui/sources/misc/renderForm';
-import {suggestUtils}                                                                                                                   from '@yarnpkg/plugin-essentials';
-import {Command, Usage}                                                                                                                 from 'clipanion';
-import {diffWords}                                                                                                                      from 'diff';
-import {Box, Color, Text}                                                                                                               from 'ink';
-import React, {useEffect, useState, useRef}                                                                                             from 'react';
-import semver                                                                                                                           from 'semver';
+import {BaseCommand, WorkspaceRequiredError}                                                                              from '@yarnpkg/cli';
+import {Cache, Configuration, Project, HardDependencies, formatUtils, miscUtils, structUtils, Descriptor, DescriptorHash} from '@yarnpkg/core';
+import * as libuiUtils                                                                                                    from '@yarnpkg/libui/sources/libuiUtils';
+import type {SubmitInjectedComponent}                                                                                     from '@yarnpkg/libui/sources/misc/renderForm';
+import {suggestUtils}                                                                                                     from '@yarnpkg/plugin-essentials';
+import {Command, Usage}                                                                                                   from 'clipanion';
+import {diffWords}                                                                                                        from 'diff';
+import semver                                                                                                             from 'semver';
+import {WriteStream}                                                                                                      from 'tty';
 
 const SIMPLE_SEMVER = /^((?:[\^~]|>=?)?)([0-9]+)(\.[0-9]+)(\.[0-9]+)((?:-\S+)?)$/;
 
+// eslint-disable-next-line @typescript-eslint/comma-dangle -- the trailing comma is required because of parsing ambiguities
+const partition = <T,>(array: Array<T>, size: number): Array<Array<T>> => {
+  return array.length > 0
+    ? [array.slice(0, size)].concat(partition(array.slice(size), size))
+    : [];
+};
+
+type UpgradeSuggestion = {value: string | null, label: string};
+type UpgradeSuggestions = Array<UpgradeSuggestion>;
+
 // eslint-disable-next-line arca/no-default-export
 export default class UpgradeInteractiveCommand extends BaseCommand {
+  static paths = [
+    [`upgrade-interactive`],
+  ];
+
   static usage: Usage = Command.Usage({
     category: `Interactive commands`,
     description: `open the upgrade interface`,
     details: `
-      This command opens a fullscreen terminal interface where you can see the packages used by your application, their status compared to the latest versions available on the remote registry, and let you upgrade.
+      This command opens a fullscreen terminal interface where you can see any out of date packages used by your application, their status compared to the latest versions available on the remote registry, and select packages to upgrade.
     `,
     examples: [[
       `Open the upgrade window`,
@@ -27,14 +38,36 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
     ]],
   });
 
-  @Command.Path(`upgrade-interactive`)
   async execute() {
+    libuiUtils.checkRequirements(this.context);
+
+    const {ItemOptions} = await import(`@yarnpkg/libui/sources/components/ItemOptions`);
+    const {Pad} = await import(`@yarnpkg/libui/sources/components/Pad`);
+    const {ScrollableItems} = await import(`@yarnpkg/libui/sources/components/ScrollableItems`);
+    const {useMinistore} = await import(`@yarnpkg/libui/sources/hooks/useMinistore`);
+    const {renderForm} = await import(`@yarnpkg/libui/sources/misc/renderForm`);
+    const {Box, Text} = await import(`ink`);
+    const {default: React, useEffect, useRef, useState} = await import(`react`);
+
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
     const {project, workspace} = await Project.find(configuration, this.context.cwd);
     const cache = await Cache.find(configuration);
 
     if (!workspace)
       throw new WorkspaceRequiredError(project.cwd, this.context.cwd);
+
+    await project.restoreInstallState({
+      restoreResolutions: false,
+    });
+
+    // 7 = 1-line command written by the user
+    //   + 2-line prompt
+    //   + 1 newline
+    //   + 1-line header
+    //   + 1 newline
+    //     [...package list]
+    //   + 1 empty line
+    const VIEWPORT_SIZE = (this.context.stdout as WriteStream).rows - 7;
 
     const colorizeRawDiff = (from: string, to: string) => {
       const diff = diffWords(from, to);
@@ -99,14 +132,14 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
       }
     };
 
-    const fetchSuggestions = async (descriptor: Descriptor) => {
+    const fetchSuggestions = async (descriptor: Descriptor): Promise<UpgradeSuggestions> => {
       const referenceRange = semver.valid(descriptor.range)
         ? `^${descriptor.range}`
         : descriptor.range;
 
-      const [resolution, dependency] = await Promise.all([
-        fetchUpdatedDescriptor(descriptor, descriptor.range, referenceRange),
-        fetchUpdatedDescriptor(descriptor, descriptor.range, `latest`),
+      const [resolution, latest] = await Promise.all([
+        fetchUpdatedDescriptor(descriptor, descriptor.range, referenceRange).catch(() => null),
+        fetchUpdatedDescriptor(descriptor, descriptor.range, `latest`).catch(() => null),
       ]);
 
       const suggestions: Array<{value: string | null, label: string}> = [{
@@ -114,18 +147,22 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
         label: descriptor.range,
       }];
 
-      if (resolution !== descriptor.range) {
+      if (resolution && resolution !== descriptor.range) {
         suggestions.push({
           value: resolution,
           label: colorizeVersionDiff(descriptor.range, resolution),
         });
+      } else {
+        suggestions.push({value: null, label: ``});
       }
 
-      if (dependency !== resolution && dependency !== descriptor.range) {
+      if (latest && latest !== resolution && latest !== descriptor.range) {
         suggestions.push({
-          value: dependency,
-          label: colorizeVersionDiff(descriptor.range, dependency),
+          value: latest,
+          label: colorizeVersionDiff(descriptor.range, latest),
         });
+      } else {
+        suggestions.push({value: null, label: ``});
       }
 
       return suggestions;
@@ -133,21 +170,29 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
 
     const Prompt = () => {
       return (
-        <Box flexDirection="row">
-          <Box flexDirection="column" width={49}>
+        <Box flexDirection={`row`}>
+          <Box flexDirection={`column`} width={49}>
             <Box marginLeft={1}>
-             Press <Color bold cyanBright>{`<up>`}</Color>/<Color bold cyanBright>{`<down>`}</Color> to select packages.
+              <Text>
+                Press <Text bold color={`cyanBright`}>{`<up>`}</Text>/<Text bold color={`cyanBright`}>{`<down>`}</Text> to select packages.
+              </Text>
             </Box>
             <Box marginLeft={1}>
-             Press <Color bold cyanBright>{`<left>`}</Color>/<Color bold cyanBright>{`<right>`}</Color> to select versions.
+              <Text>
+                Press <Text bold color={`cyanBright`}>{`<left>`}</Text>/<Text bold color={`cyanBright`}>{`<right>`}</Text> to select versions.
+              </Text>
             </Box>
           </Box>
-          <Box flexDirection="column">
+          <Box flexDirection={`column`}>
             <Box marginLeft={1}>
-             Press <Color bold cyanBright>{`<enter>`}</Color> to install.
+              <Text>
+                Press <Text bold color={`cyanBright`}>{`<enter>`}</Text> to install.
+              </Text>
             </Box>
             <Box marginLeft={1}>
-             Press <Color bold cyanBright>{`<ctrl+c>`}</Color> to abort.
+              <Text>
+                Press <Text bold color={`cyanBright`}>{`<ctrl+c>`}</Text> to abort.
+              </Text>
             </Box>
           </Box>
         </Box>
@@ -156,23 +201,48 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
 
     const Header = () => {
       return (
-        <Box flexDirection="row" paddingTop={1} paddingBottom={1}>
+        <Box flexDirection={`row`} paddingTop={1} paddingBottom={1}>
           <Box width={50}>
             <Text bold>
-              <Color greenBright>?</Color> Pick the packages you want to upgrade.
+              <Text color={`greenBright`}>?</Text> Pick the packages you want to upgrade.
             </Text>
           </Box>
-          <Box width={17}><Color bold underline gray>Current</Color></Box>
-          <Box width={17}><Color bold underline gray>Range/Latest</Color></Box>
+          <Box width={17}><Text bold underline color={`gray`}>Current</Text></Box>
+          <Box width={17}><Text bold underline color={`gray`}>Range</Text></Box>
+          <Box width={17}><Text bold underline color={`gray`}>Latest</Text></Box>
         </Box>
       );
     };
 
-    const UpgradeEntry = ({active, descriptor}: {active: boolean, descriptor: Descriptor}) => {
+    const UpgradeEntry = ({active, descriptor, suggestions}: {active: boolean, descriptor: Descriptor, suggestions: Array<UpgradeSuggestion>}) => {
       const [action, setAction] = useMinistore<string | null>(descriptor.descriptorHash, null);
-      const [suggestions, setSuggestions] = useState<Array<{value: string | null, label: string}> | null>(null);
 
+      const packageIdentifier = structUtils.stringifyIdent(descriptor);
+      const padLength = Math.max(0, 45 - packageIdentifier.length);
+      return <>
+        <Box>
+          <Box width={45}>
+            <Text bold>
+              {structUtils.prettyIdent(configuration, descriptor)}
+            </Text>
+            <Pad active={active} length={padLength}/>
+          </Box>
+          <ItemOptions active={active} options={suggestions} value={action} skewer={true} onChange={setAction} sizes={[17, 17, 17]} />
+        </Box>
+      </>;
+    };
+
+    const UpgradeEntries = ({dependencies}: {dependencies: Array<Descriptor>}) => {
+      const [suggestions, setSuggestions] = useState<Array<{descriptor: Descriptor, suggestions: UpgradeSuggestions} | null>>(dependencies.map(() => null));
       const mountedRef = useRef<boolean>(true);
+
+      const getSuggestionsForDescriptor = async (descriptor: Descriptor) => {
+        const suggestions = await fetchSuggestions(descriptor);
+        if (suggestions.filter(suggestion => suggestion.label !== ``).length <= 1)
+          return null;
+
+        return {descriptor, suggestions};
+      };
 
       useEffect(() => {
         return () => {
@@ -181,26 +251,71 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
       }, []);
 
       useEffect(() => {
-        fetchSuggestions(descriptor).then(suggestions => {
+        // Updating the invisible suggestions as they resolve causes continuous lag spikes while scrolling through the list of visible suggestions.
+        // Because of that, we update the invisible suggestions in batches of VIEWPORT_SIZE.
+
+        const foregroundDependencyCount = Math.trunc(VIEWPORT_SIZE * 1.75);
+
+        const foregroundDependencies = dependencies.slice(0, foregroundDependencyCount);
+        const backgroundDependencies = dependencies.slice(foregroundDependencyCount);
+
+        const backgroundDependencyGroups = partition(backgroundDependencies, VIEWPORT_SIZE);
+
+        const foregroundLock = foregroundDependencies
+          .map(getSuggestionsForDescriptor)
+          .reduce(async (lock, currentSuggestionPromise) => {
+            await lock;
+
+            const currentSuggestion = await currentSuggestionPromise;
+            if (currentSuggestion === null)
+              return;
+
+            if (!mountedRef.current)
+              return;
+
+            setSuggestions(suggestions => {
+              const firstEmptySlot = suggestions.findIndex(suggestion => suggestion === null);
+
+              const newSuggestions = [...suggestions];
+              newSuggestions[firstEmptySlot] = currentSuggestion;
+
+              return newSuggestions;
+            });
+          }, Promise.resolve());
+
+        backgroundDependencyGroups.reduce((lock, group) =>
+          Promise.all(group.map(descriptor => Promise.resolve().then(() => getSuggestionsForDescriptor(descriptor))))
+            .then(async newSuggestions => {
+              newSuggestions = newSuggestions.filter(suggestion => suggestion !== null);
+
+              await lock;
+              if (mountedRef.current) {
+                setSuggestions(suggestions => {
+                  const firstEmptySlot = suggestions.findIndex(suggestion => suggestion === null);
+                  return suggestions
+                    .slice(0, firstEmptySlot)
+                    .concat(newSuggestions)
+                    .concat(suggestions.slice(firstEmptySlot + newSuggestions.length));
+                });
+              }
+            }), foregroundLock,
+        ).then(() => {
+          // Cleanup all empty slots
           if (mountedRef.current) {
-            setSuggestions(suggestions);
+            setSuggestions(suggestions => suggestions.filter(suggestion => suggestion !== null));
           }
         });
-      }, [
-        descriptor.descriptorHash,
-      ]);
+      }, []);
 
-      return <Box>
-        <Box width={45} textWrap="wrap">
-          <Text bold>
-            {structUtils.prettyIdent(configuration, descriptor)}
-          </Text>
-        </Box>
-        {suggestions !== null
-          ? <ItemOptions active={active} options={suggestions} value={action} onChange={setAction} sizes={[17, 17, 17]} />
-          : <Box marginLeft={2}><Color gray>Fetching suggestions...</Color></Box>
-        }
-      </Box>;
+      if (!suggestions.length)
+        return <Text>No upgrades found</Text>;
+
+      return <ScrollableItems radius={VIEWPORT_SIZE >> 1} children={suggestions.map((suggestion, index) => {
+        // We use the same keys so that we don't lose the selection when a suggestion finishes loading
+        return suggestion !== null
+          ? <UpgradeEntry key={index} active={false} descriptor={suggestion.descriptor} suggestions={suggestion.suggestions} />
+          : <Text key={index}>Loading...</Text>;
+      })} />;
     };
 
     const GlobalListApp: SubmitInjectedComponent<Map<string, string | null>> = ({useSubmit}) => {
@@ -212,24 +327,25 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
         for (const dependencyType of [`dependencies`, `devDependencies`] as Array<HardDependencies>)
           for (const descriptor of workspace.manifest[dependencyType].values())
             if (project.tryWorkspaceByDescriptor(descriptor) === null)
-              allDependencies.set(descriptor.descriptorHash, descriptor);
+              if (!descriptor.range.startsWith(`link:`))
+                allDependencies.set(descriptor.descriptorHash, descriptor);
 
       const sortedDependencies = miscUtils.sortMap(allDependencies.values(), descriptor => {
         return structUtils.stringifyDescriptor(descriptor);
       });
 
-      return <>
-        <Box flexDirection={`column`}>
-          <Prompt/>
-          <Header/>
-          <ScrollableItems radius={10} children={sortedDependencies.map(descriptor => {
-            return <UpgradeEntry key={descriptor.descriptorHash} active={false} descriptor={descriptor} />;
-          })} />
-        </Box>
-      </>;
+      return <Box flexDirection={`column`}>
+        <Prompt/>
+        <Header/>
+        <UpgradeEntries dependencies={sortedDependencies} />
+      </Box>;
     };
 
-    const updateRequests = await renderForm(GlobalListApp, {});
+    const updateRequests = await renderForm(GlobalListApp, {}, {
+      stdin: this.context.stdin,
+      stdout: this.context.stdout,
+      stderr: this.context.stderr,
+    });
     if (typeof updateRequests === `undefined`)
       return 1;
 
@@ -253,14 +369,11 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
     if (!hasChanged)
       return 0;
 
-    const installReport = await StreamReport.start({
-      configuration,
+    return await project.installWithNewReport({
+      quiet: this.context.quiet,
       stdout: this.context.stdout,
-      includeLogs: !this.context.quiet,
-    }, async report => {
-      await project.install({cache, report});
+    }, {
+      cache,
     });
-
-    return installReport.exitCode();
   }
 }
